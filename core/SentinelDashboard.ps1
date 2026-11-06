@@ -78,7 +78,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Security Sentinel Ultra v3.2 - Cyber-EDR Command Center" Height="830" Width="1080"
+        Title="Security Sentinel Ultra v4.0 - Cyber-EDR Command Center" Height="830" Width="1080"
         WindowStartupLocation="CenterScreen" Background="#060911" FontFamily="Segoe UI"
         Foreground="#E2E8F0">
     <Window.Resources>
@@ -164,7 +164,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
                         </Border>
                         <TextBlock Text="SECURITY SENTINEL ULTRA" FontSize="22" FontWeight="Bold" Foreground="#38BDF8" VerticalAlignment="Center"/>
                         <Border Background="#1E1B4B" BorderBrush="#4338CA" BorderThickness="1" CornerRadius="4" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="v3.2 TELEMETRY EDITION" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
+                            <TextBlock Text="v4.0 TELEMETRY EDITION" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
                         </Border>
                     </StackPanel>
                     <TextBlock Text="Autonomous Endpoint Defense | Real-Time Hardware &amp; Process Telemetry | Response Engine | SHA-256 VT &amp; Discord Integration" FontSize="12" Foreground="#94A3B8" Margin="0,5,0,0"/>
@@ -503,7 +503,16 @@ function Update-DashboardStatus {
         $script:lastProcCpuMs = $curCpuMs
         $script:lastWallTime  = $now
 
-        $txtPid.Text = "PID: $($proc.Id) | Active"
+        $gPidTxt = ""
+        $gPidFile = Join-Path $SentinelDir "guardian.pid"
+        if (Test-Path $gPidFile) {
+            $gRaw = (Get-Content $gPidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($gRaw -and ($gRaw.Trim() -match "^\d+$")) {
+                $gProc = Get-Process -Id ([int]$gRaw.Trim()) -ErrorAction SilentlyContinue
+                if ($gProc) { $gPidTxt = " + Twin: $($gProc.Id)" }
+            }
+        }
+        $txtPid.Text = "PID: $($proc.Id)$gPidTxt | Active"
         $txtSentinelMetrics.Text = "CPU: $($sentinelCpu.ToString('0.0'))% | RAM: $memMB MB"
         $txtSentinelMetrics.Foreground = [Windows.Media.Brushes]::MediumSpringGreen
         $barSentinelLoad.Value = [Math]::Max(2.0, [Math]::Min(100.0, ($memMB / 10.0) + $sentinelCpu))
@@ -594,7 +603,7 @@ $btnTestAlert.Add_Click({
     $balloon = New-Object System.Windows.Forms.NotifyIcon
     $balloon.Icon = [System.Drawing.SystemIcons]::Shield
     $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-    $balloon.BalloonTipTitle = "Security Sentinel Ultra v3.2"
+    $balloon.BalloonTipTitle = "Security Sentinel Ultra v4.0"
     $balloon.BalloonTipText = "Telemetry & Notification System is 100% operational!"
     $balloon.Visible = $true
     $balloon.ShowBalloonTip(4000)
@@ -606,18 +615,18 @@ $btnTestAlert.Add_Click({
         try {
             $body = @{
                 username = "Security Sentinel Ultra EDR"
-                content  = "**[TEST] Security Sentinel Ultra v3.2 - Telemetry & Webhook Verified!**"
+                content  = "**[TEST] Security Sentinel Ultra v4.0 - Telemetry & Webhook Verified!**"
                 embeds   = @(
                     @{
                         title       = "[TIER 1-5] Endpoint Telemetry & Webhook Active"
-                        description = "Your PC is actively guarded by **Security Sentinel Ultra v3.2**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
+                        description = "Your PC is actively guarded by **Security Sentinel Ultra v4.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
                         color       = 1096065
                         fields      = @(
                             @{ name = "Endpoint";           value = "$env:COMPUTERNAME ($env:USERNAME)";  inline = $true },
                             @{ name = "System CPU / RAM";   value = "CPU: $($txtSysCpuPct.Text) | RAM: $($txtSysRamPct.Text)"; inline = $true },
                             @{ name = "Sentinel Footprint"; value = "$($txtSentinelMetrics.Text)";        inline = $true }
                         )
-                        footer      = @{ text = "Security Sentinel Ultra v3.2 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
+                        footer      = @{ text = "Security Sentinel Ultra v4.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
                     }
                 )
             } | ConvertTo-Json -Depth 6
@@ -757,11 +766,14 @@ $btnQuarantine.Add_Click({
 
 # Button: Restart/Start Daemon
 $btnToggleDaemon.Add_Click({
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1" } | ForEach-Object {
+    $stopFlag = Join-Path $SentinelDir "graceful_stop.flag"
+    "STOP" | Out-File -FilePath $stopFlag -Encoding UTF8 -Force
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 600
+    if (Test-Path $stopFlag) { Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue }
 
     try {
         Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop

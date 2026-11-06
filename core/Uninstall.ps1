@@ -1,29 +1,39 @@
 # =====================================================================
-# Security Sentinel - Uninstaller
-# Version 2.0 (Clean Removal & Multi-Folder Cleanup)
+# Security Sentinel Ultra v4.0 - Uninstaller
+# Clean Removal & Guardian Twin Shutdown
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
 $SentinelDir = "$env:LOCALAPPDATA\SecuritySentinel"
 $PidFile     = "$SentinelDir\sentinel.pid"
+$GuardianPid = "$SentinelDir\guardian.pid"
+$StopFlag    = "$SentinelDir\graceful_stop.flag"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL - UNINSTALLER v2.0                   " -ForegroundColor Yellow
+Write-Host "   SECURITY SENTINEL ULTRA v4.0 - UNINSTALLER             " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Stop processes
-Write-Host "`n[1/4] Stopping Sentinel daemon processes..." -ForegroundColor White
-if (Test-Path $PidFile) {
-    $pId = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-    if ($pId -match '^\d+$') {
-        Stop-Process -Id ([int]$pId) -Force -ErrorAction SilentlyContinue
+# 1. Signal Guardian Twin & Stop processes
+Write-Host "`n[1/4] Disarming Guardian Twin & Stopping Sentinel processes..." -ForegroundColor White
+if (Test-Path $SentinelDir) {
+    "STOP" | Out-File -FilePath $StopFlag -Encoding UTF8 -Force
+}
+Start-Sleep -Milliseconds 300
+
+foreach ($pf in @($GuardianPid, $PidFile)) {
+    if (Test-Path $pf) {
+        $pId = (Get-Content $pf -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+        if ($pId -match '^\d+$') {
+            Stop-Process -Id ([int]$pId) -Force -ErrorAction SilentlyContinue
+        }
     }
 }
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelDashboard\.ps1" } | ForEach-Object {
+
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1|SentinelDashboard\.ps1" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
-Write-Host "  -> Active processes stopped." -ForegroundColor Green
+Write-Host "  -> Active Watchdog & Guardian Twin processes stopped." -ForegroundColor Green
 
 # 2. Remove Scheduled Task
 Write-Host "`n[2/4] Removing Scheduled Task from Windows..." -ForegroundColor White
@@ -35,7 +45,6 @@ Write-Host "`n[3/4] Removing Desktop shortcut..." -ForegroundColor White
 $desktopDir = [Environment]::GetFolderPath('Desktop')
 $sc = Join-Path $desktopDir "Security Sentinel Dashboard.lnk"
 if (Test-Path $sc) { Remove-Item $sc -Force }
-# Also check traditional userprofile path just in case
 $fallbackSc = "$env:USERPROFILE\Desktop\Security Sentinel Dashboard.lnk"
 if (Test-Path $fallbackSc) { Remove-Item $fallbackSc -Force }
 Write-Host "  -> Desktop shortcuts removed." -ForegroundColor Green
