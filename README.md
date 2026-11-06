@@ -1,4 +1,4 @@
-# 🛡️ Security Sentinel Ultra v3.2 (Portable EDR)
+﻿# 🛡️ Security Sentinel Ultra v3.2 (Portable EDR)
 
 **Autonomous Endpoint Threat Defense & Real-Time Behavioral Watchdog for Windows 10 / 11**  
 *Zero-Dependency • Event-Driven (0% Gaming FPS Impact) • Tier 1–5 Master Architecture*
@@ -57,4 +57,5 @@ SecuritySentinel_Portable/
 
 * **CPU Usage ขณะปกติ:** `0.0% – 0.2%` (ทำงานแบบ Event-Driven ตื่นเฉพาะเมื่อมีเหตุการณ์)
 * **RAM Footprint:** `~30 MB`
-* **Anti-Cheat Safe:** รองรับการทำงานร่วมกับ **Riot Vanguard (Valorant)**, **Easy Anti-Cheat (EAC)**, และ **BattlEye** 100% เนื่องจากทำงานในโหมด User-Mode Telemetry โดยไม่แทรกแซงหน่วยความจำของเกม และมีระบบ Whitelist ใบรับรองดิจิทัลของ `Riot Games`, `Valve Corp (Steam)`, `Epic Games`, `NVIDIA`, และ `AMD`
+* **Anti-Cheat Safe:** รองรับการทำงานร่วมกับ **Riot Vanguard (Valorant)**, **Easy Anti-Cheat (EAC)**, **BattlEye**, และ **Wellbia** 100% เนื่องจากทำงานในโหมด User-Mode Telemetry โดยไม่แทรกแซงหน่วยความจำของเกม พร้อมระบบ Trusted Publisher Whitelist ครอบคลุมค่ายเกมสากล (`Roblox Corporation`, `KRAFTON (PUBG)`, `Overwolf`, `Riot Games`, `Valve Corp (Steam)`, `Epic Games`, `Blizzard`, `EA`, `Ubisoft`, `Discord`, `NVIDIA`, `AMD`, `Intel`, `Logitech`, `Razer`)
+* **Game Infostealer Defense:** มีกับดัก Canary Honeypot ดักจับมัลแวร์ขโมยคุกกี้ Roblox (`.ROBLOSECURITY`), Steam Session (`ssfn`), และ Riot Token โดยอัตโนมัติ

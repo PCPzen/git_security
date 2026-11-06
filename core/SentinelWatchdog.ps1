@@ -1,4 +1,4 @@
-# =====================================================================
+﻿# =====================================================================
 # Security Sentinel Ultra - Autonomous Endpoint Defense Daemon
 # Version 3.0 (Tier 1-5 Master Architecture: ETW/WMI Process Guard,
 # NtSuspendProcess Freeze, Network Killswitch, SHA-256 VT & Discord Webhook)
@@ -327,7 +327,12 @@ function Test-IsTrustedBinary {
         $sig = Get-AuthenticodeSignature -FilePath $FilePath -ErrorAction SilentlyContinue
         if ($sig -and $sig.Status -eq 'Valid') {
             $subject = $sig.SignerCertificate.Subject
-            if ($subject -match "Google LLC|Microsoft Corporation|Mozilla Corporation|Brave Software|Opera Software|Valve Corp|Epic Games|Riot Games|NVIDIA Corporation|Advanced Micro Devices") {
+            # Trusted global vendors, game publishers, and hardware vendors
+            $pattern = "Google LLC|Microsoft Corporation|Mozilla Corporation|Brave Software|Opera Software|" +
+                       "Valve Corp|Epic Games|Riot Games|NVIDIA Corporation|Advanced Micro Devices|Intel Corporation|" +
+                       "Overwolf Ltd|KRAFTON|PUBG|BattlEye|Wellbia|Discord|Electronic Arts|Ubisoft|Blizzard Entertainment|" +
+                       "Roblox Corporation|Logitech|Razer|Corsair|SteelSeries"
+            if ($subject -match $pattern) {
                 return $true
             }
         }
@@ -401,7 +406,10 @@ $canaryHeader = @"
 
 $canaryFiles = @(
     "$CanaryDir\crypto_wallet_vault_seed.txt",
-    "$CanaryDir\saved_passwords_export.txt"
+    "$CanaryDir\saved_passwords_export.txt",
+    "$CanaryDir\roblox_security_cookie_backup.txt",
+    "$CanaryDir\steam_account_credentials_backup.txt",
+    "$CanaryDir\riot_games_session_token.txt"
 )
 
 if ($script:Config.DecoyInDocuments -and (Test-Path ([Environment]::GetFolderPath('MyDocuments')))) {
@@ -606,7 +614,10 @@ $canaryAction = {
 
     # STRICT CANARY FILTER: Only trigger if the target is an explicit Canary decoy trap!
     $cLeaf = Split-Path $cFile -Leaf
-    $validCanaries = @("crypto_wallet_vault_seed.txt", "saved_passwords_export.txt", "Crypto_Recovery_Phrase_Decoy.txt")
+    $validCanaries = @(
+        "crypto_wallet_vault_seed.txt", "saved_passwords_export.txt", "Crypto_Recovery_Phrase_Decoy.txt",
+        "roblox_security_cookie_backup.txt", "steam_account_credentials_backup.txt", "riot_games_session_token.txt"
+    )
     if ($validCanaries -notcontains $cLeaf) {
         return
     }
@@ -719,7 +730,7 @@ function Inspect-NewProcesses {
         }
 
         # RULE 1 (Tier 2): Parent-Child Anomaly (Browser or Game Launcher spawning Shell / LOLBin)
-        $isHighRiskParent = ($parentName -match "^(chrome|msedge|brave|opera|nikke|nikke_launcher|discord|telegram|steam)\.exe$")
+        $isHighRiskParent = ($parentName -match "^(chrome|msedge|brave|opera|nikke|nikke_launcher|discord|telegram|steam|robloxplayerbeta|robloxstudio|riotclientservices|valorant|tslgame)\.exe$")
         $isShellOrLolbin  = ($cName -match "^(powershell|pwsh|cmd|mshta|wscript|cscript|regsvr32|certutil|bitsadmin)\.exe$")
 
         if ($isHighRiskParent -and $isShellOrLolbin) {
