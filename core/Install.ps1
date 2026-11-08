@@ -1,7 +1,7 @@
 # =====================================================================
 # Security Sentinel Ultra - Universal 1-Click Installer
-# Version 6.0 (Enterprise Telemetry, External Trust Anchor, ProgramFiles
-# Admin Isolation, NTFS ACL EoP Lockdown, SACL 4663 & Event 4104)
+# Version 7.0 (Work & Gaming Safe-Mode, OWNER RIGHTS DACL, 256-Bit
+# CSPRNG InstallSecret, Fail-Closed Trust Anchor & Windows 11 Verified)
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
@@ -11,13 +11,39 @@ $isAdmin   = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsId
 $StateDir  = "$env:LOCALAPPDATA\SecuritySentinel"
 $TargetDir = if ($isAdmin) { "$env:ProgramFiles\SecuritySentinel" } else { $StateDir }
 $SourceDir = $PSScriptRoot
-$Entropy   = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL ULTRA - INSTALLER v6.0 (ENTERPRISE)  " -ForegroundColor Yellow
+Write-Host "   SECURITY SENTINEL ULTRA - INSTALLER v7.0 (SAFE-MODE)   " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-function New-StopTokenFile($dir) {
+function Get-OrCreateInstallSecret {
+    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regPath) {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+            if ($b64) {
+                try { return [Convert]::FromBase64String($b64) } catch {}
+            }
+        }
+    }
+    $rngBytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($rngBytes)
+    $b64New = [Convert]::ToBase64String($rngBytes)
+    $regHkcu = "HKCU:\Software\SecuritySentinel\IntegrityAnchor"
+    if (-not (Test-Path $regHkcu)) { New-Item -Path $regHkcu -Force | Out-Null }
+    Set-ItemProperty -Path $regHkcu -Name "InstallSecret" -Value $b64New -Force
+    if ($isAdmin) {
+        $regHklm = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+        if (-not (Test-Path $regHklm)) { New-Item -Path $regHklm -Force | Out-Null }
+        Set-ItemProperty -Path $regHklm -Name "InstallSecret" -Value $b64New -Force
+    }
+    return $rngBytes
+}
+
+$Entropy = Get-OrCreateInstallSecret
+$LegacyEntropy = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+
+function Signal-GracefulStop($dir) {
     try {
         $pidF = "$dir\sentinel.pid"
         $wdPid = if (Test-Path $pidF) { (Get-Content $pidF -ErrorAction SilentlyContinue | Select-Object -First 1).Trim() } else { "0" }
@@ -29,19 +55,17 @@ function New-StopTokenFile($dir) {
 }
 
 # 1. Deploy Files
-Write-Host "`n[1/4] Deploying v6.0 Enterprise engine files to: $TargetDir" -ForegroundColor White
+Write-Host "`n[1/4] Deploying v7.0 Work & Gaming Safe-Mode engine files to: $TargetDir" -ForegroundColor White
 @($StateDir, "$StateDir\logs", "$StateDir\quarantine", $TargetDir) | ForEach-Object {
     if (-not (Test-Path $_)) { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
 }
 
-New-StopTokenFile $StateDir
-"STOP" | Out-File -FilePath "$StateDir\graceful_stop.flag" -Encoding UTF8 -Force
+Signal-GracefulStop $StateDir
+Start-Sleep -Milliseconds 1800
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
-Start-Sleep -Milliseconds 600
 Remove-Item "$StateDir\graceful_stop.token" -Force -ErrorAction SilentlyContinue
-Remove-Item "$StateDir\graceful_stop.flag" -Force -ErrorAction SilentlyContinue
 
 if ($isAdmin) {
     icacls "$StateDir\*.ps1" /reset /T /C /Q 2>&1 | Out-Null
@@ -58,7 +82,7 @@ foreach ($s in $coreScripts) {
     }
 }
 
-# Generate External Code Integrity Trust Anchor (Manifest + Registry Anchor)
+# Generate Fail-Closed External Code Integrity Trust Anchor (Manifest + Registry Anchor)
 $hashes = [ordered]@{}
 foreach ($s in $coreScripts) {
     $p = Join-Path $TargetDir $s
@@ -70,7 +94,7 @@ foreach ($s in $coreScripts) {
 $jsonHashes = ($hashes | ConvertTo-Json -Compress)
 $sealedBytes = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($jsonHashes), $Entropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
 $manifestObj = [ordered]@{
-    Version      = "6.0"
+    Version      = "7.0"
     UpdatedAt    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     SealedHashes = [Convert]::ToBase64String($sealedBytes)
 }
@@ -104,7 +128,7 @@ if ((-not (Test-Path $cfgPath)) -and (Test-Path $srcCfg)) {
     Copy-Item -Path $srcCfg -Destination $cfgPath -Force
 }
 
-Write-Host "  -> Core engine v6.0, Guardian Twin, External Trust Anchor & DPAPI config deployed." -ForegroundColor Green
+Write-Host "  -> Core engine v7.0, Guardian Twin, CSPRNG Trust Anchor & Work/Gaming Safe-Mode deployed." -ForegroundColor Green
 
 # 2. Tier 1 & Tier 4 Security Hardening
 Write-Host "`n[2/4] Applying Pillar 1 & Tier 4 Windows Telemetry & Hardening..." -ForegroundColor White
@@ -138,9 +162,9 @@ try {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     if ($isAdmin) {
         $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
-        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Description "Autonomous Endpoint Security Sentinel Ultra v6.0" -ErrorAction Stop | Out-Null
+        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Description "Autonomous Endpoint Security Sentinel Ultra v7.0" -ErrorAction Stop | Out-Null
     } else {
-        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "Autonomous Endpoint Security Sentinel Ultra v6.0" -ErrorAction Stop | Out-Null
+        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "Autonomous Endpoint Security Sentinel Ultra v7.0" -ErrorAction Stop | Out-Null
     }
     Write-Host "  -> Scheduled Task registered successfully (Target: $TargetDir\SentinelWatchdog.ps1)." -ForegroundColor Green
 } catch {
@@ -148,13 +172,13 @@ try {
 }
 
 # 4. Start Daemon
-Write-Host "`n[4/4] Activating Real-Time Protection Shield (v6.0 Enterprise Telemetry)..." -ForegroundColor White
+Write-Host "`n[4/4] Activating Real-Time Protection Shield (v7.0 Work & Gaming Safe-Mode)..." -ForegroundColor White
 try {
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
 } catch {
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\SentinelWatchdog.ps1`"" -WindowStyle Hidden
 }
-Write-Host "  -> Security Sentinel Ultra v6.0 Shield & Guardian Twin are now ACTIVE!" -ForegroundColor Green
+Write-Host "  -> Security Sentinel Ultra v7.0 Shield & Guardian Twin are now ACTIVE!" -ForegroundColor Green
 
 # 5. Desktop Shortcut
 $desktopDir = [Environment]::GetFolderPath('Desktop')
@@ -165,11 +189,11 @@ if (Test-Path $desktopDir) {
     $desktopShortcut.TargetPath = "powershell.exe"
     $desktopShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetDir\SentinelDashboard.ps1`""
     $desktopShortcut.IconLocation = "shell32.dll,220"
-    $desktopShortcut.Description = "Open Security Sentinel Ultra v6.0 Command Center"
+    $desktopShortcut.Description = "Open Security Sentinel Ultra v7.0 Command Center"
     $desktopShortcut.Save()
     Write-Host "  -> Created 'Security Sentinel Dashboard' shortcut on Desktop." -ForegroundColor Green
 }
 
 Write-Host "`n==========================================================" -ForegroundColor Cyan
-Write-Host " INSTALLATION COMPLETED SUCCESSFULLY! (v6.0 ENTERPRISE)   " -ForegroundColor Yellow
+Write-Host " INSTALLATION COMPLETED SUCCESSFULLY! (v7.0 SAFE-MODE)    " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan

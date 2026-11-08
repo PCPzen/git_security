@@ -53,7 +53,20 @@ try {
     }
 } catch {}
 
-$script:SentinelEntropyBytes = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+function Get-DashboardInstallSecretBytes {
+    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regPath) {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+            if ($b64) {
+                try { return [Convert]::FromBase64String($b64) } catch {}
+            }
+        }
+    }
+    return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+}
+
+$script:SentinelEntropyBytes = Get-DashboardInstallSecretBytes
+$script:LegacyEntropyBytes   = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 function Protect-DpapiString([string]$PlainText) {
     if ([string]::IsNullOrWhiteSpace($PlainText)) { return "" }
@@ -67,15 +80,15 @@ function Protect-DpapiString([string]$PlainText) {
 function Unprotect-DpapiString([string]$CipherBase64) {
     if ([string]::IsNullOrWhiteSpace($CipherBase64)) { return "" }
     try {
-        $enc   = [Convert]::FromBase64String($CipherBase64)
-        try {
-            $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-            return [System.Text.Encoding]::UTF8.GetString($bytes)
-        } catch {
-            $bytesLegacy = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-            return [System.Text.Encoding]::UTF8.GetString($bytesLegacy)
+        $enc = [Convert]::FromBase64String($CipherBase64)
+        foreach ($ent in @($script:SentinelEntropyBytes, $script:LegacyEntropyBytes, $null)) {
+            try {
+                $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $ent, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+                return [System.Text.Encoding]::UTF8.GetString($bytes)
+            } catch {}
         }
-    } catch { return "" }
+    } catch {}
+    return ""
 }
 
 function New-AuthenticatedStopToken {
@@ -103,7 +116,8 @@ $defaultConfig = [ordered]@{
     EnableToastAlert         = $true
     DecoyInDocuments         = $true
     AutoFreezeSuspiciousProc = $true
-    AutoFreezeMinRiskScore   = 60
+    SafeWorkGamingMode       = $true
+    AutoFreezeMinRiskScore   = 85
     AutoNetworkKillswitch    = $false
     ScanIntervalSeconds      = 15
 }
@@ -164,7 +178,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Security Sentinel Ultra v6.0 - Cyber-EDR Command Center" Height="830" Width="1080"
+        Title="Security Sentinel Ultra v7.0 - Cyber-EDR Command Center" Height="830" Width="1080"
         WindowStartupLocation="CenterScreen" Background="#060911" FontFamily="Segoe UI"
         Foreground="#E2E8F0">
     <Window.Resources>
@@ -250,7 +264,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
                         </Border>
                         <TextBlock Text="SECURITY SENTINEL ULTRA" FontSize="22" FontWeight="Bold" Foreground="#38BDF8" VerticalAlignment="Center"/>
                         <Border Background="#1E1B4B" BorderBrush="#4338CA" BorderThickness="1" CornerRadius="4" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="v6.0 ENTERPRISE TELEMETRY" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
+                            <TextBlock Text="v7.0 WORK & GAMING SAFE-MODE" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
                         </Border>
                     </StackPanel>
                     <TextBlock Text="Autonomous Endpoint Defense | Real-Time Hardware &amp; Process Telemetry | Response Engine | SHA-256 VT &amp; Discord Integration" FontSize="12" Foreground="#94A3B8" Margin="0,5,0,0"/>
@@ -689,7 +703,7 @@ $btnTestAlert.Add_Click({
     $balloon = New-Object System.Windows.Forms.NotifyIcon
     $balloon.Icon = [System.Drawing.SystemIcons]::Shield
     $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-    $balloon.BalloonTipTitle = "Security Sentinel Ultra v6.0"
+    $balloon.BalloonTipTitle = "Security Sentinel Ultra v7.0"
     $balloon.BalloonTipText = "Telemetry & Notification System is 100% operational!"
     $balloon.Visible = $true
     $balloon.ShowBalloonTip(4000)
@@ -701,18 +715,18 @@ $btnTestAlert.Add_Click({
         try {
             $body = @{
                 username = "Security Sentinel Ultra EDR"
-                content  = "**[TEST] Security Sentinel Ultra v6.0 - Telemetry & Webhook Verified!**"
+                content  = "**[TEST] Security Sentinel Ultra v7.0 - Telemetry & Webhook Verified!**"
                 embeds   = @(
                     @{
                         title       = "[TIER 1-5] Endpoint Telemetry & Webhook Active"
-                        description = "Your PC is actively guarded by **Security Sentinel Ultra v6.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
+                        description = "Your PC is actively guarded by **Security Sentinel Ultra v7.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
                         color       = 1096065
                         fields      = @(
                             @{ name = "Endpoint";           value = "$env:COMPUTERNAME ($env:USERNAME)";  inline = $true },
                             @{ name = "System CPU / RAM";   value = "CPU: $($txtSysCpuPct.Text) | RAM: $($txtSysRamPct.Text)"; inline = $true },
                             @{ name = "Sentinel Footprint"; value = "$($txtSentinelMetrics.Text)";        inline = $true }
                         )
-                        footer      = @{ text = "Security Sentinel Ultra v6.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
+                        footer      = @{ text = "Security Sentinel Ultra v7.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
                     }
                 )
             } | ConvertTo-Json -Depth 6
@@ -876,7 +890,7 @@ $btnToggleDaemon.Add_Click({
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 600
+    Start-Sleep -Milliseconds 1600
     if (Test-Path $StopTokenFile) { Remove-Item $StopTokenFile -Force -ErrorAction SilentlyContinue }
 
     try {

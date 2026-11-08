@@ -1,6 +1,6 @@
 # =====================================================================
-# Security Sentinel Ultra v6.0 - Uninstaller
-# Clean Removal, Custom-Entropy DPAPI Stop-Token & ACL Reset
+# Security Sentinel Ultra v7.0 - Uninstaller
+# Clean Removal, CSPRNG Authenticated Stop-Token & ACL Reset
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
@@ -11,14 +11,27 @@ $ProgDir     = "$env:ProgramFiles\SecuritySentinel"
 $PidFile     = "$StateDir\sentinel.pid"
 $GuardianPid = "$StateDir\guardian.pid"
 $StopTokenF  = "$StateDir\graceful_stop.token"
-$Entropy     = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+
+function Get-InstallSecret {
+    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regPath) {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+            if ($b64) {
+                try { return [Convert]::FromBase64String($b64) } catch {}
+            }
+        }
+    }
+    return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+}
+
+$Entropy = Get-InstallSecret
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL ULTRA v6.0 - UNINSTALLER             " -ForegroundColor Yellow
+Write-Host "   SECURITY SENTINEL ULTRA v7.0 - UNINSTALLER             " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Generate DPAPI Authenticated Stop-Token & Stop processes
-Write-Host "`n[1/4] Disarming Guardian Twin (Custom-Entropy Stop-Token) & Stopping processes..." -ForegroundColor White
+# 1. Generate CSPRNG Authenticated Stop-Token & Wait for Graceful Self-Exit
+Write-Host "`n[1/4] Disarming Guardian Twin (CSPRNG Stop-Token) & Stopping processes..." -ForegroundColor White
 if (Test-Path $StateDir) {
     try {
         $wdPid = if (Test-Path $PidFile) { (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim() } else { "0" }
@@ -27,18 +40,8 @@ if (Test-Path $StateDir) {
         $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $Entropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
         [System.IO.File]::WriteAllText($StopTokenF, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
     } catch {}
-    "STOP" | Out-File -FilePath "$StateDir\graceful_stop.flag" -Encoding UTF8 -Force
 }
-Start-Sleep -Milliseconds 400
-
-foreach ($pf in @($GuardianPid, $PidFile)) {
-    if (Test-Path $pf) {
-        $pId = (Get-Content $pf -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-        if ($pId -match '^\d+$') {
-            Stop-Process -Id ([int]$pId) -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
+Start-Sleep -Milliseconds 1800
 
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1|SentinelDashboard\.ps1" } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue

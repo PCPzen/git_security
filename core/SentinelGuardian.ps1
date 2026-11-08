@@ -1,9 +1,13 @@
 # =====================================================================
-# Security Sentinel Ultra v6.0 - Guardian Twin (Enterprise Hardened)
-# 1. Real Kernel DACL Writeback including WRITE_DAC & WRITE_OWNER Deny
-# 2. Custom-Entropy DPAPI Stop-Token bound to exact Watchdog PID
-# 3. External Trust Anchor (Registry + Sealed Manifest) SHA-256 Verification
+# Security Sentinel Ultra v7.0 - Guardian Twin (Fail-Closed Hardened)
+# 1. Real Kernel DACL Writeback with OWNER RIGHTS (S-1-3-4) Restriction
+#    (Blocks WRITE_DAC & PROCESS_TERMINATE even from same-user processes)
+# 2. Per-Install 256-bit CSPRNG Secret + PID-Bound Stop-Token Verification
+# 3. Fail-Closed External Trust Anchor (Zero disk-hash fallback!)
 # =====================================================================
+param(
+    [switch]$LibraryOnly
+)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -24,7 +28,6 @@ $StopFlagFile = "$StateDir\graceful_stop.token"
 
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
-# Apply Real Kernel DACL Self-Defense on Guardian Twin Process (Denies Terminate, VM_Write, Suspend, WRITE_DAC, WRITE_OWNER)
 $daclCode = @"
 using System;
 using System.Runtime.InteropServices;
@@ -54,16 +57,20 @@ namespace SentinelGuardianNative {
                 if (!GetKernelObjectSecurity(hProc, DACL_SECURITY_INFORMATION, sdBytes, lenNeeded, out lenNeeded)) return false;
 
                 RawSecurityDescriptor rsd = new RawSecurityDescriptor(sdBytes, 0);
-                RawAcl dacl = rsd.DiscretionaryAcl;
-                if (dacl == null) return false;
+                RawAcl newDacl = new RawAcl(rsd.DiscretionaryAcl != null ? rsd.DiscretionaryAcl.Revision : (byte)2, 4);
 
                 SecurityIdentifier worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
                 int denyMask = 0x0001 | 0x0008 | 0x0020 | 0x0800 | 0x00040000 | 0x00080000;
-                CommonAce denyAce = new CommonAce(AceFlags.None, AceQualifier.AccessDenied, denyMask, worldSid, false, null);
+                newDacl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessDenied, denyMask, worldSid, false, null));
 
-                dacl.InsertAce(0, denyAce);
-                rsd.DiscretionaryAcl = dacl;
+                SecurityIdentifier ownerRightsSid = new SecurityIdentifier("S-1-3-4");
+                int ownerAllowMask = 0x0400 | 0x1000 | 0x0010 | 0x00100000;
+                newDacl.InsertAce(1, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, ownerAllowMask, ownerRightsSid, false, null));
 
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
+                newDacl.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, ownerAllowMask, currentSid, false, null));
+
+                rsd.DiscretionaryAcl = newDacl;
                 byte[] newSdBytes = new byte[rsd.BinaryLength];
                 rsd.GetBinaryForm(newSdBytes, 0);
                 return SetKernelObjectSecurity(hProc, DACL_SECURITY_INFORMATION, newSdBytes);
@@ -79,26 +86,38 @@ try {
     if (-not ("SentinelGuardianNative.SelfDefense" -as [type])) {
         Add-Type -TypeDefinition $daclCode -Language CSharp -ErrorAction SilentlyContinue
     }
-    [void][SentinelGuardianNative.SelfDefense]::HardenDacl()
 } catch {}
 
-$PID | Out-File -FilePath $GuardianPidF -Encoding UTF8 -Force
-$script:SentinelEntropyBytes = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+function Get-GuardianInstallationSecretBytes {
+    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regPath) {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+            if ($b64) {
+                try { return [Convert]::FromBase64String($b64) } catch {}
+            }
+        }
+    }
+    return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+}
+
+$script:SentinelEntropyBytes = Get-GuardianInstallationSecretBytes
+$script:LegacyEntropyBytes   = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 function Unprotect-DpapiString([string]$cipherBase64) {
     if ([string]::IsNullOrWhiteSpace($cipherBase64)) { return "" }
     try {
         $enc = [Convert]::FromBase64String($cipherBase64)
-        try {
-            $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-            return [System.Text.Encoding]::UTF8.GetString($dec)
-        } catch {
-            $decLegacy = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-            return [System.Text.Encoding]::UTF8.GetString($decLegacy)
+        foreach ($ent in @($script:SentinelEntropyBytes, $script:LegacyEntropyBytes, $null)) {
+            try {
+                $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $ent, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+                return [System.Text.Encoding]::UTF8.GetString($dec)
+            } catch {}
         }
-    } catch { return "" }
+    } catch {}
+    return ""
 }
 
+# FAIL-CLOSED TRUST ANCHOR: Never falls back to reading current file hash from disk!
 function Get-TrustedWatchdogHash {
     foreach ($regAnchor in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
         if (Test-Path $regAnchor) {
@@ -118,15 +137,11 @@ function Get-TrustedWatchdogHash {
             }
         } catch {}
     }
-    if (Test-Path $WatchdogPath) {
-        return (Get-FileHash -Path $WatchdogPath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-    }
+    # Fail-Closed: Return empty string if Trust Anchor is missing or invalid!
     return ""
 }
 
-$script:ExpectedWatchdogHash = Get-TrustedWatchdogHash
-
-function Test-AuthenticatedStopToken {
+function Test-GuardianStopToken {
     if (-not (Test-Path $StopFlagFile)) { return $false }
     try {
         $raw = (Get-Content $StopFlagFile -Raw -Encoding UTF8).Trim()
@@ -150,7 +165,6 @@ function Test-AuthenticatedStopToken {
             return $false
         }
 
-        # Verify that the PID in the stop token matches the recorded Watchdog PID!
         if (Test-Path $WatchdogPidF) {
             $expectedWdPid = (Get-Content $WatchdogPidF -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
             if ($expectedWdPid -match "^\d+$" -and ($tokenPid -ne $expectedWdPid)) {
@@ -165,6 +179,16 @@ function Test-AuthenticatedStopToken {
     }
 }
 
+if ($LibraryOnly) {
+    return
+}
+
+try {
+    [void][SentinelGuardianNative.SelfDefense]::HardenDacl()
+} catch {}
+
+$PID | Out-File -FilePath $GuardianPidF -Encoding UTF8 -Force
+
 function Write-GuardianLog {
     param([string]$Message, [string]$Level = "CRITICAL")
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -173,7 +197,7 @@ function Write-GuardianLog {
 }
 
 function Send-TamperDiscordAlert {
-    param([string]$DeadPid, [string]$NewPid, [string]$Note = "Dual-Process Guardian Twin Armed (Kernel DACL + Trust Anchor)")
+    param([string]$DeadPid, [string]$NewPid, [string]$Note = "Dual-Process Guardian Twin Armed (OWNER RIGHTS DACL + Fail-Closed Trust Anchor)")
     if (-not (Test-Path $ConfigFile)) { return }
     try {
         $cfg = Get-Content $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -186,11 +210,11 @@ function Send-TamperDiscordAlert {
 
         $ping = if ($cfg.DiscordMentionOnCritical) { "**[CRITICAL TAMPER PROTECTION ALERT]** @everyone" } else { "" }
         $payload = @{
-            username = "Security Sentinel Ultra v6.0 EDR"
+            username = "Security Sentinel Ultra v7.0 EDR"
             content  = $ping
             embeds   = @(@{
                 title       = "[CRITICAL] Tier 3 Tamper Protection: Watchdog Resurrected!"
-                description = "An unauthorized attempt to terminate **Security Sentinel Watchdog** was detected! **Guardian Twin** immediately intercepted the termination, verified SHA-256 script integrity against the External Trust Anchor, and resurrected the defense engine."
+                description = "An unauthorized attempt to terminate **Security Sentinel Watchdog** was detected! **Guardian Twin** immediately intercepted the termination, verified SHA-256 script integrity against the Fail-Closed External Trust Anchor, and resurrected the defense engine."
                 color       = 16711680
                 fields      = @(
                     @{ name = "Endpoint";        value = "$env:COMPUTERNAME ($env:USERNAME)"; inline = $true },
@@ -198,7 +222,7 @@ function Send-TamperDiscordAlert {
                     @{ name = "Resurrected PID"; value = "$NewPid (Active)";                  inline = $true },
                     @{ name = "Defense Status";  value = $Note;                               inline = $false }
                 )
-                footer = @{ text = "Security Sentinel Ultra v6.0 | Enterprise Self-Defense | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
+                footer = @{ text = "Security Sentinel Ultra v7.0 | Enterprise Self-Defense | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
             })
         } | ConvertTo-Json -Depth 6
         Invoke-RestMethod -Uri $webhookUrl.Trim() -Method Post -ContentType "application/json; charset=utf-8" -Body $payload -TimeoutSec 5 | Out-Null
@@ -206,25 +230,30 @@ function Send-TamperDiscordAlert {
 }
 
 while ($true) {
-    Start-Sleep -Seconds 3
-
-    if (Test-AuthenticatedStopToken) {
-        Remove-Item $GuardianPidF -Force -ErrorAction SilentlyContinue
-        exit 0
+    for ($w = 0; $w -lt 6; $w++) {
+        Start-Sleep -Milliseconds 500
+        if (Test-GuardianStopToken) {
+            Remove-Item $GuardianPidF -Force -ErrorAction SilentlyContinue
+            exit 0
+        }
     }
 
     if (-not (Test-Path $WatchdogPath)) { continue }
 
-    # Verify Watchdog Script SHA-256 Integrity against External Trust Anchor
+    # Fail-Closed Verification against External Trust Anchor (Zero disk fallback!)
     $expectedHash = Get-TrustedWatchdogHash
-    if ($expectedHash) {
-        $currHash = (Get-FileHash -Path $WatchdogPath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-        if ($currHash -and ($currHash -ne $expectedHash)) {
-            Write-GuardianLog "[TAMPER-GUARD] CRITICAL: SentinelWatchdog.ps1 hash mismatch against Trust Anchor ($currHash != $expectedHash)! Refusing to execute tampered script!" "CRITICAL"
-            Send-TamperDiscordAlert -DeadPid "TAMPERED" -NewPid "BLOCKED" -Note "ALERT: SentinelWatchdog.ps1 modified on disk! Execution blocked by Trust Anchor to prevent EoP."
-            Start-Sleep -Seconds 10
-            continue
-        }
+    if ([string]::IsNullOrWhiteSpace($expectedHash)) {
+        Write-GuardianLog "[TAMPER-GUARD] CRITICAL: External Trust Anchor missing or corrupted! Fail-Closed active: refusing to execute unverified SentinelWatchdog.ps1!" "CRITICAL"
+        Start-Sleep -Seconds 10
+        continue
+    }
+
+    $currHash = (Get-FileHash -Path $WatchdogPath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+    if (-not $currHash -or ($currHash -ne $expectedHash)) {
+        Write-GuardianLog "[TAMPER-GUARD] CRITICAL: SentinelWatchdog.ps1 hash mismatch against Trust Anchor ($currHash != $expectedHash)! Refusing to execute tampered script!" "CRITICAL"
+        Send-TamperDiscordAlert -DeadPid "TAMPERED" -NewPid "BLOCKED" -Note "ALERT: SentinelWatchdog.ps1 modified on disk! Execution blocked by Fail-Closed Trust Anchor to prevent EoP."
+        Start-Sleep -Seconds 10
+        continue
     }
 
     $wdAlive = $false
@@ -242,7 +271,7 @@ while ($true) {
 
     if (-not $wdAlive) {
         Start-Sleep -Milliseconds 400
-        if (Test-AuthenticatedStopToken) {
+        if (Test-GuardianStopToken) {
             Remove-Item $GuardianPidF -Force -ErrorAction SilentlyContinue
             exit 0
         }
@@ -250,7 +279,7 @@ while ($true) {
         $newProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WatchdogPath`"" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
         $newPid = if ($newProc) { "$($newProc.Id)" } else { "Spawned" }
 
-        Write-GuardianLog "[TAMPER-GUARD] Watchdog (PID: $lastPid) was unexpectedly terminated! Guardian Twin verified Trust Anchor SHA-256 and resurrected Watchdog (New PID: $newPid)." "CRITICAL"
+        Write-GuardianLog "[TAMPER-GUARD] Watchdog (PID: $lastPid) was unexpectedly terminated! Guardian Twin verified Fail-Closed Trust Anchor SHA-256 and resurrected Watchdog (New PID: $newPid)." "CRITICAL"
         Send-TamperDiscordAlert -DeadPid $lastPid -NewPid $newPid
         Start-Sleep -Seconds 3
     }

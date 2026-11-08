@@ -7,8 +7,10 @@
     "EnableSoundAlert":  true,
     "EnableToastAlert":  true,
     "DecoyInDocuments":  true,
+    "SafeWorkGamingMode":  true,
     "AutoFreezeSuspiciousProc":  true,
-    "AutoFreezeMinRiskScore":  60,
+    "AutoFreezeMinRiskScore":  85,
+    "AggressiveBrowserQuarantine":  false,
     "AutoNetworkKillswitch":  false,
     "ScanIntervalSeconds":  15
 }

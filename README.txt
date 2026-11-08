@@ -1,51 +1,41 @@
 ========================================================================
-   SECURITY SENTINEL ULTRA v6.0 - Enterprise Telemetry & Behavioral EDR
+   SECURITY SENTINEL ULTRA v7.0 - Work & Gaming Safe-Mode Enterprise EDR
 ========================================================================
 
-แพ็กเกจชุดป้องกันมัลแวร์ระดับ EDR แบบ "Portable 100%" พัฒนาตามกรอบ 6 Pillars:
-Kernel/Event Telemetry, Live Memory Forensics, External Code Integrity,
-Behavioral Correlation, Safe Automated Response และ Red-Team Audit Suite
+แพ็กเกจชุดป้องกันมัลแวร์ระดับ EDR แบบ "Portable 100%" ออกแบบมาให้ปลอดภัยสูงสุด
+โดย "ไม่รบกวนเวลาทำงาน (Coding/Office) หรือเวลาเล่นเกม (Gaming)" บน Windows 10/11!
 
 ------------------------------------------------------------------------
 [วิธีติดตั้ง] (แนะนำให้คลิกขวา Run as administrator):
 ------------------------------------------------------------------------
 1. คลิกขวาที่ไฟล์ "1-Click-Install.bat" -> เลือก "Run as administrator"
-   - เมื่อรันด้วยสิทธิ์ Admin ระบบจะติดตั้งลง C:\Program Files\SecuritySentinel
-   - ล็อกสิทธิ์ไฟล์ .ps1 ด้วย icacls (ป้องกัน User Malware แก้ไขสคริปต์)
-   - บันทึกค่าแฮช Trust Anchor ลงใน HKLM Registry และเปิด SACL Event 4663
+   - ติดตั้งลง C:\Program Files\SecuritySentinel และล็อกสิทธิ์ด้วย icacls
+   - สร้างกุญแจสุ่ม 256-bit CSPRNG InstallSecret และเก็บ Trust Anchor ใน HKLM
+   - เปิดทำงาน Work & Gaming Safe-Mode อัตโนมัติ (ไม่ทำให้เกมหรือโปรแกรมทำงานค้าง!)
 
 2. เปิดหน้าต่างควบคุม Command Center Dashboard:
    -> ดับเบิ้ลคลิกไอคอนบน Desktop หรือกด "Sentinel-Dashboard.bat"
 
-3. การรันชุดทดสอบจำลองการโจมตี (Red-Team Self-Audit):
+3. การรันชุดทดสอบจำลองการโจมตีจริง (Live E2E Red-Team Audit):
    -> รันไฟล์ core\Invoke-RedTeamAudit.ps1 ด้วย PowerShell
 
 ------------------------------------------------------------------------
-[6 แกนหลักที่อัปเกรดใน v6.0 Enterprise Edition]:
+[ไฮไลท์การอัปเกรดใน v7.0 Work & Gaming Safe-Mode Edition]:
 ------------------------------------------------------------------------
-1. Deep Event Telemetry (Event ID 4104 & SACL 4663 XML Attribution):
-   - ตรวจจับ PowerShell ScriptBlock ในหน่วยความจำ (Event 4104)
-   - แยกวิเคราะห์ XML ของ Event 4663 ระบุชื่อโปรเซสและ PID ที่แอบอ่านไฟล์ Canary
+1. Work & Gaming Safe-Mode (ทำงานและเล่นเกมไม่มีสะดุด 0% False Positive):
+   - ยกเลิกการเหมารวม -WindowStyle Hidden และยกเว้นสคริปต์ของ Sentinel ที่ผ่านเช็ก SHA-256
+   - ปกป้องโปรแกรมทำงาน (VS Code, Visual Studio, Node, Git, Python, Rust, Docker)
+     และตัวรันเกม (Steam, Riot, Roblox, Epic, Overwolf) เวลาสร้างไฟล์ใน %TEMP%
+   - Browser Watcher กักกันเฉพาะไฟล์มัลแวร์ที่ถูก Pack (Entropy >= 7.2) หรือมีลิงก์ C2
+     ทำให้ Browser Extension และโมดูลเสริมทำงานได้ปกติ 100%
 
-2. Live Memory Forensics & Injection Scanner:
-   - สแกน RAM ด้วย VirtualQueryEx + ReadProcessMemory ดึงลิงก์ C2/Webhook
-   - ตรวจจับ MEM_PRIVATE RWX Pages และส่วนหัวไฟล์ MZ/PE ที่ซ่อนใน RAM (Reflective PE)
+2. OWNER RIGHTS (S-1-3-4) Kernel DACL Self-Defense:
+   - บล็อกทั้งสิทธิ์ PROCESS_TERMINATE (สั่งปิด) และ WRITE_DAC (สั่งแก้สิทธิ์)
+     แม้แต่โปรเซสที่รันด้วยชื่อ User เดียวกันก็ไม่สามารถแก้ DACL หรือสั่งปิด Watchdog ได้!
 
-3. External Code Integrity & Hardened DACL:
-   - ปฏิเสธสิทธิ์ WRITE_DAC (0x00040000) และ WRITE_OWNER (0x00080000) ใน DACL
-   - ตรวจสอบแฮช SHA-256 เทียบกับ Registry IntegrityAnchor และ manifest.json
-   - โทเคนสั่งปิดระบบผูกกับ Custom Entropy และต้องตรงกับหมายเลข PID ของ Watchdog จริง
+3. Fail-Closed Trust Anchor & 256-bit CSPRNG Secret:
+   - ยกเลิก Fallback ที่เชื่อไฟล์บนดิสก์ และเปลี่ยนมาใช้กุญแจสุ่ม 256-bit เฉพาะเครื่อง
 
-4. Behavioral Correlation & Base64 Command Decoder + 28 Persistence Vectors:
-   - ถอดรหัส Base64 (-enc / FromBase64String) ก่อนคำนวณคะแนนความเสี่ยงเสมอ
-   - แก้ไขกฎ Rule 1 + Rule 2: หากเบราว์เซอร์เปิด PowerShell แบบเข้ารหัส จะได้คะแนน >= 75/100
-     แจ้งเตือน CRITICAL เสมอ และสั่ง Freeze ทันทีโดยไม่ข้ามกฎ
-   - ตรวจสอบ Persistence จริงครบ 28 จุด (Run/RunOnce, Winlogon, IFEO, WMI, Tasks, PSProfile ฯลฯ)
-
-5. Safe Automated Response (NtResumeProcess & Signed Binary Safety):
-   - ปกป้องตัวติดตั้งโปรแกรมที่มีใบรับรองดิจิทัลถูกต้องใน %TEMP% ไม่ให้ถูก Freeze ผิดพลาด
-   - ปุ่ม [RESUME / ROLLBACK] เรียกใช้ NtResumeProcess ปลดแช่แข็งโปรเซสจริงและกู้คืนไฟล์กักกัน
-
-6. Red-Team Testing (Invoke-RedTeamAudit.ps1):
-   - ชุดทดสอบอัตโนมัติ 6 ข้อตามกรอบ MITRE ATT&CK ยืนยันความถูกต้องของทุกกลไก
+4. Real End-to-End Automated Test Suite (Invoke-RedTeamAudit.ps1):
+   - เรียกใช้ฟังก์ชันจริงของ Watchdog และ Guardian ทดสอบครบทั้ง 6 ด้านบน Windows 11
 ========================================================================
