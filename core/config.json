@@ -1,11 +1,14 @@
-﻿{
+{
     "DiscordWebhookUrl":  "",
+    "DiscordWebhookEncrypted":  "",
     "DiscordMentionOnCritical":  true,
     "VirusTotalApiKey":  "",
+    "VirusTotalKeyEncrypted":  "",
     "EnableSoundAlert":  true,
     "EnableToastAlert":  true,
     "DecoyInDocuments":  true,
     "AutoFreezeSuspiciousProc":  true,
+    "AutoFreezeMinRiskScore":  60,
     "AutoNetworkKillswitch":  false,
     "ScanIntervalSeconds":  15
 }

@@ -1,25 +1,33 @@
 # =====================================================================
-# Security Sentinel Ultra v4.0 - Uninstaller
-# Clean Removal & Guardian Twin Shutdown
+# Security Sentinel Ultra v5.0 - Uninstaller
+# Clean Removal, DPAPI Authenticated Stop-Token & ACL Reset
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
 $SentinelDir = "$env:LOCALAPPDATA\SecuritySentinel"
 $PidFile     = "$SentinelDir\sentinel.pid"
 $GuardianPid = "$SentinelDir\guardian.pid"
-$StopFlag    = "$SentinelDir\graceful_stop.flag"
+$StopTokenF  = "$SentinelDir\graceful_stop.token"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL ULTRA v4.0 - UNINSTALLER             " -ForegroundColor Yellow
+Write-Host "   SECURITY SENTINEL ULTRA v5.0 - UNINSTALLER             " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Signal Guardian Twin & Stop processes
-Write-Host "`n[1/4] Disarming Guardian Twin & Stopping Sentinel processes..." -ForegroundColor White
+# 1. Generate DPAPI Authenticated Stop-Token & Stop processes
+Write-Host "`n[1/4] Disarming Guardian Twin (DPAPI Stop-Token) & Stopping processes..." -ForegroundColor White
 if (Test-Path $SentinelDir) {
-    "STOP" | Out-File -FilePath $StopFlag -Encoding UTF8 -Force
+    try {
+        $wdPid = if (Test-Path $PidFile) { (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim() } else { "0" }
+        $payload = "STOP|$wdPid|$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        [System.IO.File]::WriteAllText($StopTokenF, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
+    } catch {}
+    "STOP" | Out-File -FilePath "$SentinelDir\graceful_stop.flag" -Encoding UTF8 -Force
 }
-Start-Sleep -Milliseconds 300
+Start-Sleep -Milliseconds 400
 
 foreach ($pf in @($GuardianPid, $PidFile)) {
     if (Test-Path $pf) {
@@ -40,7 +48,7 @@ Write-Host "`n[2/4] Removing Scheduled Task from Windows..." -ForegroundColor Wh
 Unregister-ScheduledTask -TaskName "SecuritySentinelWatchdog" -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host "  -> Task 'SecuritySentinelWatchdog' removed." -ForegroundColor Green
 
-# 3. Remove Desktop Shortcut (OneDrive Desktop compatible)
+# 3. Remove Desktop Shortcut
 Write-Host "`n[3/4] Removing Desktop shortcut..." -ForegroundColor White
 $desktopDir = [Environment]::GetFolderPath('Desktop')
 $sc = Join-Path $desktopDir "Security Sentinel Dashboard.lnk"

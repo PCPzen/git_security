@@ -1,9 +1,9 @@
 # =====================================================================
 # Security Sentinel Ultra - Modern GUI Command Center (WPF / XAML)
-# Version 3.2 (Cyber-SOC UI + Real-Time CPU/RAM Telemetry + Tier 1-5)
+# Version 5.0 (Red-Team Hardened Edition: DPAPI + Live RAM + Kernel DACL)
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic, System.Security
 
 $SentinelDir   = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
 $ConfigFile    = Join-Path $SentinelDir "config.json"
@@ -13,6 +13,7 @@ $QuarDir       = Join-Path $SentinelDir "quarantine"
 $PidFile       = Join-Path $SentinelDir "sentinel.pid"
 $NetFile       = Join-Path $SentinelDir "network.state"
 $FrozenFile    = Join-Path $SentinelDir "last_frozen.pid"
+$StopTokenFile = Join-Path $SentinelDir "graceful_stop.token"
 $ScriptPath    = Join-Path $SentinelDir "SentinelWatchdog.ps1"
 if (-not (Test-Path $ScriptPath)) { $ScriptPath = Join-Path $PSScriptRoot "SentinelWatchdog.ps1" }
 
@@ -26,14 +27,50 @@ if ((-not (Test-Path $ConfigFile)) -and (Test-Path $PortableCfg)) {
     Copy-Item -Path $PortableCfg -Destination $ConfigFile -Force
 }
 
+function Protect-DpapiString([string]$PlainText) {
+    if ([string]::IsNullOrWhiteSpace($PlainText)) { return "" }
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+        $enc   = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        return [Convert]::ToBase64String($enc)
+    } catch { return "" }
+}
+
+function Unprotect-DpapiString([string]$CipherBase64) {
+    if ([string]::IsNullOrWhiteSpace($CipherBase64)) { return "" }
+    try {
+        $enc   = [Convert]::FromBase64String($CipherBase64)
+        $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        return [System.Text.Encoding]::UTF8.GetString($bytes)
+    } catch { return "" }
+}
+
+function New-AuthenticatedStopToken {
+    try {
+        $wdPid = "ANY"
+        if (Test-Path $PidFile) {
+            $rawPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($rawPid -and ($rawPid.Trim() -match '^\d+$')) { $wdPid = $rawPid.Trim() }
+        }
+        $ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $cipher = Protect-DpapiString "STOP|$wdPid|$ts"
+        if ($cipher) {
+            [System.IO.File]::WriteAllText($StopTokenFile, $cipher, [System.Text.Encoding]::UTF8)
+        }
+    } catch {}
+}
+
 $defaultConfig = [ordered]@{
     DiscordWebhookUrl        = ""
+    DiscordWebhookEncrypted  = ""
     DiscordMentionOnCritical = $true
     VirusTotalApiKey         = ""
+    VirusTotalKeyEncrypted   = ""
     EnableSoundAlert         = $true
     EnableToastAlert         = $true
     DecoyInDocuments         = $true
     AutoFreezeSuspiciousProc = $true
+    AutoFreezeMinRiskScore   = 60
     AutoNetworkKillswitch    = $false
     ScanIntervalSeconds      = 15
 }
@@ -48,6 +85,12 @@ function Get-SentinelConfig {
                     $raw | Add-Member -NotePropertyName $k -NotePropertyValue $defaultConfig[$k] -Force
                 }
             }
+            if ([string]::IsNullOrWhiteSpace($raw.DiscordWebhookUrl) -and (-not [string]::IsNullOrWhiteSpace($raw.DiscordWebhookEncrypted))) {
+                $raw.DiscordWebhookUrl = Unprotect-DpapiString $raw.DiscordWebhookEncrypted
+            }
+            if ([string]::IsNullOrWhiteSpace($raw.VirusTotalApiKey) -and (-not [string]::IsNullOrWhiteSpace($raw.VirusTotalKeyEncrypted))) {
+                $raw.VirusTotalApiKey = Unprotect-DpapiString $raw.VirusTotalKeyEncrypted
+            }
             return $raw
         } catch {
             return [PSCustomObject]$defaultConfig
@@ -60,11 +103,21 @@ function Get-SentinelConfig {
 }
 
 function Save-SentinelConfig($cfgObj) {
-    $json = ($cfgObj | ConvertTo-Json -Depth 4)
-    [System.IO.File]::WriteAllText($ConfigFile, $json, [System.Text.Encoding]::UTF8)
-    if (Test-Path $PortableCfg) {
-        [System.IO.File]::WriteAllText($PortableCfg, $json, [System.Text.Encoding]::UTF8)
+    $diskObj = [ordered]@{}
+    foreach ($k in $defaultConfig.Keys) { $diskObj[$k] = $cfgObj.$k }
+    if (-not [string]::IsNullOrWhiteSpace($cfgObj.DiscordWebhookUrl)) {
+        $diskObj["DiscordWebhookEncrypted"] = Protect-DpapiString $cfgObj.DiscordWebhookUrl
+        $diskObj["DiscordWebhookUrl"]       = ""
+    } else {
+        $diskObj["DiscordWebhookEncrypted"] = ""
+        $diskObj["DiscordWebhookUrl"]       = ""
     }
+    if (-not [string]::IsNullOrWhiteSpace($cfgObj.VirusTotalApiKey)) {
+        $diskObj["VirusTotalKeyEncrypted"] = Protect-DpapiString $cfgObj.VirusTotalApiKey
+        $diskObj["VirusTotalApiKey"]       = ""
+    }
+    $json = ($diskObj | ConvertTo-Json -Depth 4)
+    [System.IO.File]::WriteAllText($ConfigFile, $json, [System.Text.Encoding]::UTF8)
 }
 
 # Standard .NET Performance Counter & ComputerInfo for Zero-Lag CPU & RAM Metrics
@@ -78,7 +131,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Security Sentinel Ultra v4.0 - Cyber-EDR Command Center" Height="830" Width="1080"
+        Title="Security Sentinel Ultra v5.0 - Cyber-EDR Command Center" Height="830" Width="1080"
         WindowStartupLocation="CenterScreen" Background="#060911" FontFamily="Segoe UI"
         Foreground="#E2E8F0">
     <Window.Resources>
@@ -164,7 +217,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
                         </Border>
                         <TextBlock Text="SECURITY SENTINEL ULTRA" FontSize="22" FontWeight="Bold" Foreground="#38BDF8" VerticalAlignment="Center"/>
                         <Border Background="#1E1B4B" BorderBrush="#4338CA" BorderThickness="1" CornerRadius="4" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="v4.0 TELEMETRY EDITION" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
+                            <TextBlock Text="v5.0 RED-TEAM HARDENED" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
                         </Border>
                     </StackPanel>
                     <TextBlock Text="Autonomous Endpoint Defense | Real-Time Hardware &amp; Process Telemetry | Response Engine | SHA-256 VT &amp; Discord Integration" FontSize="12" Foreground="#94A3B8" Margin="0,5,0,0"/>
@@ -603,7 +656,7 @@ $btnTestAlert.Add_Click({
     $balloon = New-Object System.Windows.Forms.NotifyIcon
     $balloon.Icon = [System.Drawing.SystemIcons]::Shield
     $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-    $balloon.BalloonTipTitle = "Security Sentinel Ultra v4.0"
+    $balloon.BalloonTipTitle = "Security Sentinel Ultra v5.0"
     $balloon.BalloonTipText = "Telemetry & Notification System is 100% operational!"
     $balloon.Visible = $true
     $balloon.ShowBalloonTip(4000)
@@ -615,18 +668,18 @@ $btnTestAlert.Add_Click({
         try {
             $body = @{
                 username = "Security Sentinel Ultra EDR"
-                content  = "**[TEST] Security Sentinel Ultra v4.0 - Telemetry & Webhook Verified!**"
+                content  = "**[TEST] Security Sentinel Ultra v5.0 - Telemetry & Webhook Verified!**"
                 embeds   = @(
                     @{
                         title       = "[TIER 1-5] Endpoint Telemetry & Webhook Active"
-                        description = "Your PC is actively guarded by **Security Sentinel Ultra v4.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
+                        description = "Your PC is actively guarded by **Security Sentinel Ultra v5.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
                         color       = 1096065
                         fields      = @(
                             @{ name = "Endpoint";           value = "$env:COMPUTERNAME ($env:USERNAME)";  inline = $true },
                             @{ name = "System CPU / RAM";   value = "CPU: $($txtSysCpuPct.Text) | RAM: $($txtSysRamPct.Text)"; inline = $true },
                             @{ name = "Sentinel Footprint"; value = "$($txtSentinelMetrics.Text)";        inline = $true }
                         )
-                        footer      = @{ text = "Security Sentinel Ultra v4.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
+                        footer      = @{ text = "Security Sentinel Ultra v5.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
                     }
                 )
             } | ConvertTo-Json -Depth 6
@@ -766,14 +819,13 @@ $btnQuarantine.Add_Click({
 
 # Button: Restart/Start Daemon
 $btnToggleDaemon.Add_Click({
-    $stopFlag = Join-Path $SentinelDir "graceful_stop.flag"
-    "STOP" | Out-File -FilePath $stopFlag -Encoding UTF8 -Force
+    New-AuthenticatedStopToken
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" } | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 600
-    if (Test-Path $stopFlag) { Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $StopTokenFile) { Remove-Item $StopTokenFile -Force -ErrorAction SilentlyContinue }
 
     try {
         Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop
