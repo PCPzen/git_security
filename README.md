@@ -1,83 +1,66 @@
-# 🛡️ Security Sentinel Ultra v5.0 (Red-Team Hardened Portable EDR)
+# 🛡️ Security Sentinel Ultra v6.0 (Enterprise Telemetry & Behavioral EDR)
 
-**Autonomous Endpoint Threat Defense, Kernel DACL Self-Protection, Live Process Memory Forensics & Real-Time Behavioral Watchdog for Windows 10 / 11**  
-*Zero-Dependency • Event-Driven (0% Gaming FPS Impact) • Tier 1–5 + v5.0 Red-Team Hardened Architecture*
-
----
-
-## 🌟 Overview (ภาพรวมระบบ v5.0 Red-Team Hardened Edition)
-
-**Security Sentinel Ultra v5.0** คือระบบป้องกัน Endpoint ขนาดพกพา (Portable EDR / HIDS) ที่พัฒนาด้วยสถาปัตยกรรม **Native Zero-Dependency** โดยใช้เครื่องมือและ API มาตรฐานที่ติดตั้งมาพร้อมกับ Windows 10 และ Windows 11 ทั้งหมด 100% (`PowerShell 5.1`, `.NET CLR`, `WPF/XAML`, `C# P/Invoke Native API`, `FileSystemWatcher`, `Windows DPAPI`, และ `WMI/CIM Real-Time Event Stream`) ไม่จำเป็นต้องติดตั้ง Python, Node.js หรือโปรแกรมเสริมใดๆ
+**Autonomous Endpoint Threat Defense, Deep Windows Telemetry (Event 4104 & SACL 4663), Live Process Memory Forensics, Behavioral Correlation & Red-Team Verified Watchdog for Windows 10 / 11**  
+*Zero-Dependency • Event-Driven (0% Gaming FPS Impact) • v6.0 6-Pillar Enterprise Architecture*
 
 ---
 
-## 🔒 9 การอัปเกรดด้านความปลอดภัยระดับ Red-Team Hardened ในเวอร์ชัน v5.0
+## 🌟 Overview (ภาพรวมระบบ v6.0 Enterprise Telemetry Edition)
 
-1. **Real Kernel DACL Writeback (`SetKernelObjectSecurity`):**
-   * แก้ไขระบบป้องกันโปรเซสตัวเองให้สมบูรณ์ครบวงจร โดยสร้าง `CommonAce (AccessDenied)` สำหรับสิทธิ์ `PROCESS_TERMINATE (0x0001)`, `PROCESS_VM_OPERATION (0x0008)`, `PROCESS_VM_WRITE (0x0020)`, และ `PROCESS_SUSPEND_RESUME (0x0800)` แทรกเข้าที่ Index `0` ของ `DiscretionaryAcl` แล้วเขียนกลับลง Kernel Object จริงผ่าน `advapi32.dll!SetKernelObjectSecurity` ทั้งบนโปรเซส Watchdog และ Guardian Twin
-2. **True Live Process Memory Forensics (`VirtualQueryEx` + `ReadProcessMemory`):**
-   * ยกระดับจากแค่การดึง String จากไฟล์บนดิสก์ (Static Disk Strings) สู่การอ่านหน่วยความจำเสมือนของโปรเซสจริง (`MEM_COMMIT`, `PAGE_READWRITE` / `PAGE_EXECUTE_READWRITE`) ผ่าน P/Invoke `VirtualQueryEx` และ `ReadProcessMemory` เพื่อดึง URL ของเซิร์ฟเวอร์ C2, Discord Webhook ของแฮกเกอร์, และ Telegram Bot Token ที่ถูกถอดรหัส (Unpack/Decrypt) อยู่ใน RAM ขณะรันไทม์ พร้อมควบคู่กับการสแกนไฟล์ไบนารีบนดิสก์
-3. **Cryptographic DPAPI Stop-Token (`graceful_stop.token`):**
-   * ยกเลิกระบบไฟล์ `graceful_stop.flag` แบบข้อความธรรมดา (Plaintext) ที่มัลแวร์สามารถสร้างเลียนแบบเพื่อสั่งปิดระบบได้ เปลี่ยนเป็น **DPAPI-Encrypted Time-Bound Token (`graceful_stop.token`)** ที่เข้ารหัสด้วย `System.Security.Cryptography.ProtectedData` ผูกกับ `PID` ของ Watchdog และเวลา `UnixTimestamp` (มีอายุไม่เกิน 60 วินาที) หากมัลแวร์สร้างไฟล์ปลอมขึ้นมา ระบบจะตรวจพบว่าเป็น **Tamper Attack** และแจ้งเตือนทันที
-4. **Zero Command-Line Bypass & SHA-256 Script Self-Integrity:**
-   * ยกเลิกการข้ามการตรวจด้วยชื่อใน Command Line (`-match "SentinelWatchdog"`) ที่มัลแวร์ใช้หลบเลี่ยงได้ เปลี่ยนเป็นการตรวจสอบ **Exact Verified PID** ควบคู่กับการคำนวณและตรวจสอบค่าแฮช **SHA-256 ของไฟล์สคริปต์ (`SentinelWatchdog.ps1` และ `SentinelGuardian.ps1`)** ทุกครั้ง หากไฟล์สคริปต์ถูกแก้ไขหรือวางยา ระบบ Guardian Twin จะระงับการรันเพื่อป้องกันการยกระดับสิทธิ์ (Privilege Escalation)
-5. **Anti-EoP NTFS ACL Locking (`icacls` Hardening):**
-   * เมื่อติดตั้งด้วยสิทธิ์ Administrator สคริปต์ `Install.ps1` จะล็อกสิทธิ์ NTFS ACL ของไฟล์ `.ps1` ทั้งหมดในโฟลเดอร์ติดตั้งให้เขียนได้เฉพาะ `SYSTEM:(F)` และ `Administrators:(F)` ส่วนผู้ใช้ทั่วไปมีสิทธิ์อ่านและรันเท่านั้น (`RX`) ป้องกันมัลแวร์ระดับ User แอบแก้ไขสคริปต์เพื่อรอรับสิทธิ์สูงขึ้นตอนเปิดเครื่อง
-6. **Composite Process Tracking (`PID|CreationDate`) & Automatic Dead-PID Pruning:**
-   * แก้ปัญหาช่องโหว่ **PID Reuse** ของ Windows โดยเปลี่ยนคีย์การจดจำโปรเซสจาก `PID` เดี่ยวๆ เป็น `PID|CreationDate` และมีระบบล้างโปรเซสที่ปิดตัวไปแล้วออกจากหน่วยความจำอัตโนมัติในทุกรอบการตรวจ
-7. **Strict Distinguished Name (DN) & Root CA Issuer Authenticode Verification:**
-   * ยกระดับการตรวจใบรับรองดิจิทัล (`Test-IsTrustedBinary`) จากการเช็กคำย่อยทั่วไป เป็นการตรวจความถูกต้องของ **Root/Intermediate Certificate Authority (`Issuer`)** ควบคู่กับ Regex แบบผูกขอบเขตฟิลด์ `CN=` / `O=` อย่างรัดกุม ป้องกันการตั้งชื่อบริษัทปลอมปนคำว่า `Intel Corporation` หรือ `Microsoft`
-8. **Risk-Score Gated Auto-Freeze & Wired `ScanIntervalSeconds`:**
-   * ลดปัญหา **False Positive** เมื่อแอปพลิเคชันปกติ (เช่น Discord, Steam, Browser) เรียกใช้ `cmd.exe` หรือ `powershell.exe` โดยระบบจะคำนวณคะแนนความเสี่ยง **Heuristic Risk Score (`0 – 100`)** ก่อน และจะสั่ง Freeze โปรเซสอัตโนมัติเฉพาะเมื่อคะแนนความเสี่ยงสูงกว่าเกณฑ์ (`AutoFreezeMinRiskScore = 60`) เท่านั้น ส่วนกรณีคะแนนต่ำจะบันทึก Log แจ้งเตือนโดยไม่ทำให้โปรแกรมของผู้ใช้ค้าง พร้อมเชื่อมต่อตัวแปร `ScanIntervalSeconds` ใน `config.json` เข้ากับลูปสแกนจริง
-9. **DPAPI Secret Storage & SACL Canary Read-Audit (Event ID 4663):**
-   * เข้ารหัส `DiscordWebhookUrl` และ `VirusTotalApiKey` ในไฟล์ `config.json` ด้วย **Windows DPAPI (`DiscordWebhookEncrypted` / `VirusTotalKeyEncrypted`)** ไม่เก็บเป็น Plaintext บนดิสก์อีกต่อไป และเพิ่มการตั้งค่า **NTFS SACL ReadData Audit Rule** บนโฟลเดอร์กับดัก Canary Honeypot ร่วมกับการตรวจจับ **Windows Security Event ID 4663** เพื่อจับมัลแวร์ที่แอบ "อ่าน" (Read) ไฟล์รหัสผ่านล่อแม้ไม่ได้แก้ไขไฟล์
+**Security Sentinel Ultra v6.0** คือระบบป้องกัน Endpoint ขนาดพกพา (Portable EDR / HIDS) ที่พัฒนาด้วยสถาปัตยกรรม **Native Zero-Dependency** โดยใช้เครื่องมือและ API มาตรฐานของ Windows 10 และ Windows 11 ทั้งหมด 100% (`PowerShell 5.1`, `.NET CLR`, `WPF/XAML`, `C# P/Invoke Native API`, `FileSystemWatcher`, `Windows DPAPI`, `WinEvent Telemetry`, และ `WMI/CIM Real-Time Event Stream`)
 
 ---
 
-## 🎯 สถาปัตยกรรมป้องกันภัยคุกคาม 5 ระดับ (Tier 1 – Tier 5 Master Architecture)
+## 🏆 6 แกนหลักที่พัฒนาและยกระดับในเวอร์ชัน v6.0 (6 Enterprise Priority Pillars)
 
-| ระดับ (Tier) | โมดูลป้องกัน | กลไกการทำงานทางเทคนิค |
-| :--- | :--- | :--- |
-| **Tier 1** | **Core Watchdog & Browser Guard** | เฝ้าระวังโฟลเดอร์ `User Data` ของ Chrome, Edge, Brave, Opera แบบ Real-time ป้องกันการหย่อน DLL แปลกปลอม พร้อมเฝ้าระวัง Persistence 28+ จุด + กับดัก **Canary Honeypot** (Filesystem Watcher + SACL Event ID 4663 Read Audit) |
-| **Tier 2** | **Real-Time Process & Anomaly Telemetry** | ดักจับ **Parent-Child Process Anomaly** ผ่าน WMI Event Stream (`__InstanceCreationEvent`) และดักจับคำสั่งเข้ารหัสอำพราง (`-EncodedCommand` / `IEX`) ด้วยระบบติดตามโปรเซสแบบ `PID|CreationDate` |
-| **Tier 3** | **Automated Response & Guardian Twin** | คอมไพล์โค้ด C# P/Invoke เรียกใช้ `ntdll.dll!NtSuspendProcess` แช่แข็งโปรเซสมัลแวร์เมื่อ Risk Score ถึงเกณฑ์, ระบบ **Guardian Twin + Kernel DACL Protection + DPAPI Stop-Token** และปุ่ม **Emergency Network Killswitch** |
-| **Tier 4** | **Zero-Trust, DLL Guard & Micro-ML** | ดักจับไฟล์ `.exe` และ `.dll` แปลกปลอมใน `%TEMP%`, ตรวจใบรับรองดิจิทัลแบบ Strict DN + Issuer, คำนวณค่า **Shannon Entropy**, เปิดบันทึก **PowerShell Script Block Logging (Event ID 4104)** และปกป้องหน่วยความจำ **LSASS (`RunAsPPL`)** |
-| **Tier 5** | **Live RAM Forensics & Discord Webhook** | สแกนหน่วยความจำจริงของโปรเซส (`VirtualQueryEx` + `ReadProcessMemory`) เพื่อดึงลิงก์ **C2 / Webhook ของแฮกเกอร์**, คำนวณค่าแฮช **SHA-256** แนบลิงก์ **VirusTotal**, และส่งการ์ดแจ้งเตือน **Rich Embed** เข้าห้อง **Discord Webhook** (เก็บรักษา Webhook ด้วยการเข้ารหัส DPAPI) |
+### 1. Kernel-Level & Deep Windows Event Telemetry (การตรวจจับพฤติกรรมระดับลึก)
+* **PowerShell ScriptBlock Telemetry (`Event ID 4104`):** ดึงข้อมูลจาก `Microsoft-Windows-PowerShell/Operational` เพื่อตรวจสอบโค้ดสคริปต์ที่ถูกถอดรหัสแล้วในหน่วยความจำ (De-obfuscated ScriptBlock) จับพฤติกรรม Fileless Malware (`AmsiUtils`, `Invoke-Mimikatz`, `MiniDumpWriteDump`, `VirtualAlloc`, การดึง `.ROBLOSECURITY` / `Login Data`) แม้ไม่ได้ส่งผ่านพารามิเตอร์บน Command Line
+* **SACL Read-Audit พร้อมระบุโปรเซสต้นตอ (`Security Event ID 4663` XML Parser):** เมื่อติดตั้งด้วยสิทธิ์ Administrator ระบบจะเปิด SACL Read Audit บนโฟลเดอร์กับดัก Canary และแยกวิเคราะห์โครงสร้าง XML ของ Event `4663` (`Parse-Event4663Xml`) เพื่อระบุ **`ProcessId` (แปลงจากฐาน 16) และ `ProcessName` ที่แอบอ่านไฟล์ล่อ** พร้อมสั่งระงับโปรเซสต้นตอทันที
+* **Real-Time WMI Process Stream (`__InstanceCreationEvent`):** ดักจับการเกิดของโปรเซสใหม่พร้อมตรวจจับด้วยคีย์ผสม `PID|CreationDate` และล้างโปรเซสที่ปิดตัวแล้วทุกรอบเพื่อป้องกันช่องโหว่ PID Reuse
 
----
+### 2. True Live Process Memory Forensics & Injection Scanner (วิเคราะห์หน่วยความจำจริง)
+* **`AnalyzeProcessMemory` (`VirtualQueryEx` + `ReadProcessMemory`):** สแกนหน่วยความจำเสมือนของโปรเซสที่ถูก Commit (`MEM_COMMIT`, สูงสุด 16 MB ต่อโปรเซส, Region ไม่เกิน 2 MB) เพื่อดึงลิงก์เซิร์ฟเวอร์ C2, Discord Webhook และ Telegram Bot Token ที่ถูกถอดรหัสอยู่ใน RAM
+* **ตรวจจับ `MEM_PRIVATE` RWX & Unbacked Reflective PE (`MITRE T1055`):** นับจำนวน Memory Page ส่วนตัวที่มีสิทธิ์ `PAGE_EXECUTE_READWRITE (0x40)` และตรวจหาส่วนหัวไฟล์ `MZ` / `PE\0\0` ที่ซ่อนอยู่ในหน่วยความจำปฏิบัติการโดยไม่มีไฟล์รองรับ (Reflective DLL Injection / Process Hollowing)
 
-## ⚖️ ขอบเขตทางสถาปัตยกรรม (Architectural Scope: User-Mode Ring 3 vs Kernel-Mode Ring 0)
+### 3. Code Integrity & Self-Defense (ความสมบูรณ์ของโค้ดและการป้องกันตัวเอง)
+* **External Trust Anchor (`Registry IntegrityAnchor` + `manifest.json`):** แยกแหล่งเก็บค่าแฮช SHA-256 ที่เชื่อถือได้ออกจากตัวสคริปต์ โดยบันทึกลงใน Registry (`HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor` เมื่อติดตั้งแบบ Admin และ `HKCU:\Software\SecuritySentinel\IntegrityAnchor`) ควบคู่กับไฟล์ `manifest.json` ที่ซีลด้วย DPAPI
+* **Kernel DACL Writeback พร้อมปฏิเสธ `WRITE_DAC` และ `WRITE_OWNER`:** ใช้ `SetKernelObjectSecurity` เขียนกฎ `AccessDenied` ปฏิเสธสิทธิ์ `PROCESS_TERMINATE (0x0001)`, `PROCESS_VM_OPERATION (0x0008)`, `PROCESS_VM_WRITE (0x0020)`, `PROCESS_SUSPEND_RESUME (0x0800)`, `WRITE_DAC (0x00040000)` และ `WRITE_OWNER (0x00080000)`
+* **PID-Bound Custom-Entropy Stop-Token (`graceful_stop.token`):** โทเคนสั่งปิดระบบถูกเข้ารหัสด้วย Custom Application Entropy (`SENTINEL_ULTRA_V6_ENTROPY_<ComputerName>`) และบังคับตรวจสอบว่า **หมายเลข PID ข้างในโทเคนต้องตรงกับ PID ของ Watchdog ที่กำลังรันอยู่จริง** และมีอายุไม่เกิน 60 วินาที
 
-เพื่อให้ผู้ใช้และทีมตรวจสอบความปลอดภัยเข้าใจขีดความสามารถตามความเป็นจริงทางวิศวกรรม:
-* **สิ่งที่ Security Sentinel Ultra v5.0 ทำได้จริงในระดับสูง:** ทำงานเป็น **User-Mode (Ring 3) Autonomous EDR & Behavioral Watchdog** ที่ไม่ต้องพึ่งพาไลบรารีภายนอก มีระบบป้องกันโปรเซสด้วย Kernel Object DACL, การอ่านหน่วยความจำด้วย `ReadProcessMemory`, การดักจับโปรเซสด้วย WMI Event Stream และการเข้ารหัสความลับด้วย DPAPI
-* **ข้อจำกัดตามธรรมชาติของ User-Mode (Ring 3):** เนื่องจาก Windows บังคับให้ Kernel Driver (`PsSetCreateProcessNotifyRoutineEx`, `ObRegisterCallbacks`, Minifilter Driver) ต้องใช้ใบรับรอง **EV Code Signing Certificate ที่ผ่านการรับรอง WHQL จาก Microsoft** โปรเจกต์ Open-Source แบบสคริปต์จึงทำงานในระดับ User-Mode ซึ่งอาจมีช่วงเวลาเสี้ยววินาที (Polling/WMI Delivery Window) ก่อนที่โปรเซสจะถูกระงับ สำหรับสภาพแวดล้อมองค์กรที่ต้องการการบล็อกระดับ Inline Kernel แนะนำให้ใช้งานร่วมกับ **Windows Defender ASR Rules** หรือ **Sysmon + Sigma Rules**
+### 4. Behavioral Detection & Cross-Signal Correlation (การเชื่อมโยงพฤติกรรม + 28 จุด Persistence จริง)
+* **Base64 Command-Line Decoder (`Expand-EncodedCommandLine`):** ถอดรหัสพารามิเตอร์ `-enc` / `-EncodedCommand` (ทั้งแบบ UTF-16LE และ UTF-8) รวมถึง `FromBase64String('...')` ออกมาวิเคราะห์ก่อนให้คะแนนความเสี่ยงเสมอ
+* **Unified Rule 1 & Rule 2 + Mandatory Obfuscation Alert:**
+  * แก้ไขจุดบอดเมื่อเบราว์เซอร์หรือเกมเปิด `powershell.exe -enc ...`: ระบบรวมคะแนน `Base (15) + ParentChildAnomaly (25) + ObfuscatedOrFilelessCmd (35) = 75/100` (และบวกเพิ่มอีก `+35` เป็น `100/100` หากภายใน Base64 ซ่อน URL/Webhook)
+  * **ไม่มีการ `return` ข้ามกฎ:** หากตรวจพบการเข้ารหัสอำพราง (`$hasObfuscation`) ระบบจะ **แจ้งเตือนระดับ `CRITICAL` เสมอ** ไม่ว่าคะแนนรวมจะเป็นเท่าไร และสั่ง Freeze ทันทีเมื่อคะแนนถึงเกณฑ์ (`>= 60`)
+* **28-Vector Persistence Sensor (`Get-PersistenceSnapshot`):** ตรวจสอบจุดฝังตัวอัตโนมัติ 28 รายการจริงในโค้ด (ครอบคลุม `HKCU/HKLM Run & RunOnce` ทั้ง 64-bit และ `WOW6432Node`, `Policies\Explorer\Run`, `Winlogon Shell/Userinit`, `Session Manager BootExecute`, `AppInit_DLLs`, `HKCU\Environment UserInitMprLogonScript`, `LSA Packages`, `SharedTaskScheduler`, `ShellServiceObjectDelayLoad`, `IFEO Debugger`, UAC Hijacks `ms-settings`/`mscfile`/`exefile`, `CLSID`, Startup Folders, Scheduled Tasks ทุกโฟลเดอร์ย่อย, `WMI root\subscription` Filters/Consumers, และไฟล์ `PowerShell $PROFILE`)
 
----
+### 5. Safe Automated Response (การตอบสนองอัตโนมัติอย่างปลอดภัย & Rollback)
+* **Unified Risk-Score Gating & การปกป้องไฟล์ติดตั้งที่มีใบรับรองถูกต้องใน Rule 3:**
+  * ใช้เกณฑ์คะแนน `AutoFreezeMinRiskScore (60)` ร่วมกันทั้ง Rule 1, Rule 2 และ Rule 3
+  * ใน **Rule 3 (`%TEMP%` Execution)**: แยกแยะระหว่าง **(1) Tier-1 Major Vendor Whitelist** (28+ บริษัทใหญ่ที่ตรวจทั้ง CA Issuer และ Strict DN `CN=/O=`) และ **(2) ไฟล์ติดตั้งทั่วไปที่มีใบรับรองดิจิทัลถูกต้อง (`IsValidSigned = true`)** โดยหากเป็นตัวติดตั้งหรืออัปเดตของโปรแกรมที่มีใบรับรองดิจิทัลถูกต้องตามมาตรฐาน CA ระบบจะ **ไม่สั่ง Freeze อัตโนมัติ** (แจ้งเตือนเฉพาะเมื่อคะแนนพฤติกรรมสูงเท่านั้น) เพื่อป้องกันปัญหา False Positive กับตัวติดตั้งโปรแกรมทั่วไป
+* **Real `NtResumeProcess` Thaw & Quarantine Rollback:** ปุ่ม **`[RESUME / ROLLBACK]`** บน Dashboard เรียกใช้ `ntdll.dll!NtResumeProcess` เพื่อปลดแช่แข็งโปรเซสกลับคืนทำงานจริง และรองรับการกู้คืนไฟล์จาก `quarantine_manifest.json`
 
-## 📂 โครงสร้างโปรเจกต์ (Project Structure)
-
-```text
-SecuritySentinel_Portable/
-├── 1-Click-Install.bat                         # คลิกเดียวเพื่อติดตั้ง ล็อกสิทธิ์ ACL, ตั้งค่า Hardening และรัน Watchdog + Guardian Twin
-├── 1-Click-Uninstall.bat                       # คลิกเดียวเพื่อออก DPAPI Stop-Token ถอนการติดตั้งและล้างไฟล์กับดักทั้งหมด
-├── Sentinel-Dashboard.bat                      # เปิดหน้าต่าง Cyber-SOC GUI Command Center Dashboard (v5.0)
-├── README.txt                                  # คู่มือการใช้งานภาษาไทยฉบับย่อ (v5.0)
-├── Security_Sentinel_Master_Plan.pdf           # เอกสารแผนแม่บทสถาปัตยกรรม (Master Engineering Plan)
-├── Security_Sentinel_SourceCode_and_Tools.pdf  # เอกสารสรุปโครงสร้าง Source Code และเครื่องมือที่ใช้พัฒนา
-└── core/
-    ├── config.json                             # ไฟล์เก็บค่าตั้งค่า (เข้ารหัส Webhook/API Key ด้วย DPAPI อัตโนมัติ)
-    ├── Install.ps1                             # สคริปต์ติดตั้งระบบ, ล็อก NTFS ACL ป้องกัน EoP, เปิด Event 4104 / AuditPol
-    ├── SentinelWatchdog.ps1                    # เอนจินป้องกันหลัก v5.0 (Kernel DACL + Live RAM Forensics + Strict Authenticode)
-    ├── SentinelGuardian.ps1                    # เอนจินคู่แฝด Guardian Twin v5.0 (ตรวจ SHA-256 Integrity + DPAPI Stop-Token)
-    ├── SentinelDashboard.ps1                   # หน้าจอควบคุมหลัก WPF/XAML GUI v5.0 + มาตรวัด CPU/RAM เรียลไทม์
-    └── Uninstall.ps1                           # สคริปต์ถอนการติดตั้งพร้อมสร้าง DPAPI Stop-Token อย่างปลอดภัย
-```
+### 6. Built-In Red Team & MITRE ATT&CK Audit Suite (`core/Invoke-RedTeamAudit.ps1`)
+* มีสคริปต์จำลองการโจมตีและตรวจสอบตัวเองอัตโนมัติ 6 ชุดทดสอบ (`T1059.001`, `T1027`, `T1055`, `T1562.001`, `T1547`, `T1555`) เพื่อยืนยันว่ากฎตรวจจับ การถอดรหัส Base64 การสแกน RAM และการป้องกัน Stop-Token ทำงานได้ครบถ้วน 100%
 
 ---
 
-## 🚀 วิธีติดตั้งและใช้งาน (Quick Start)
+## ⚖️ ขอบเขตทางสถาปัตยกรรมและความโปร่งใสทางเทคนิค (Security Boundaries)
 
-1. ดาวน์โหลดหรือ Clone โปรเจกต์นี้ลงบนเครื่องคอมพิวเตอร์ (Windows 10 / 11)
-2. ดับเบิลคลิกไฟล์ **`1-Click-Install.bat`** (แนะนำให้คลิกขวา **Run as administrator** เพื่อเปิดใช้งานการล็อกสิทธิ์ NTFS ACL ป้องกัน EoP และเปิด SACL Read Audit เต็มรูปแบบ)
-3. เปิดหน้าต่างควบคุมโดยดับเบิลคลิกที่ **`Sentinel-Dashboard.bat`** หรือไอคอนบนหน้าจอ Desktop
-4. นำลิงก์ **Discord Webhook URL** มาวางในช่องบนหน้าจอ Dashboard แล้วกด **`[SAVE] Save Config`** ระบบจะเข้ารหัสลิงก์ของคุณด้วย **Windows DPAPI** เก็บลงเครื่องอย่างปลอดภัยทันที!
+เพื่อให้ผู้ใช้และทีมตรวจสอบความปลอดภัยทราบขอบเขตตามความเป็นจริงของโค้ด:
+1. **การติดตั้งแบบ Administrator (`Program Files` + ACL Lock) vs การติดตั้งแบบ User ทั่วไป (`%LOCALAPPDATA%`):**
+   * **เมื่อคลิกขวา `Run as administrator` ตอนติดตั้ง (`1-Click-Install.bat`):** ระบบจะติดตั้งเอนจินลงใน `C:\Program Files\SecuritySentinel`, ล็อกสิทธิ์ไฟล์ `.ps1` ด้วย `icacls` ให้แก้ไขได้เฉพาะ `SYSTEM` และ `Administrators`, บันทึก Trust Anchor ลงใน `HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor`, และเปิด `auditpol` สำหรับ SACL Event 4663 Read Audit
+   * **เมื่อติดตั้งด้วยสิทธิ์ User ธรรมดา (ไม่กด Run as Admin):** ระบบจะทำงานในโหมดพกพาที่ `%LOCALAPPDATA%\SecuritySentinel` ซึ่งช่วยตรวจจับและสกัดกั้นมัลแวร์ทั่วไปได้ดี แต่ **มัลแวร์ที่รันภายใต้สิทธิ์ User เดียวกัน** จะยังมีสิทธิ์ตามธรรมชาติของ Windows ในการถอดรหัส `DPAPI CurrentUser` (แม้จะมี Custom Entropy หากมัลแวร์อ่านค่า Entropy จากไฟล์สคริปต์ได้) หรือแก้ไข DACL ของโปรเซสที่ตนเป็นเจ้าของ (Owner) ดังนั้น **แนะนำให้ติดตั้งด้วยสิทธิ์ Administrator เสมอสำหรับการใช้งานจริง**
+2. **User-Mode (Ring 3) vs Kernel Driver (Ring 0):**
+   * ระบบนี้ทำงานในระดับ User-Mode โดยอาศัย WMI Event Stream (`__InstanceCreationEvent`) และ Windows Event Log (`4104` / `4663`) ซึ่งมีความหน่วงระดับเสี้ยววินาทีถึงไม่กี่วินาที หากต้องการบล็อกระดับ Inline Kernel (0 ms) แนะนำให้เปิดใช้งานร่วมกับ **Windows Defender Attack Surface Reduction (ASR)** หรือ **Sysmon**
+
+---
+
+## 🚀 วิธีติดตั้ง ใช้งาน และรันชุดทดสอบ Red-Team Audit
+
+1. **การติดตั้ง:** คลิกขวาที่ไฟล์ **`1-Click-Install.bat`** แล้วเลือก **Run as administrator**
+2. **การเปิดหน้าจอควบคุม:** ดับเบิลคลิกไฟล์ **`Sentinel-Dashboard.bat`** หรือไอคอน **Security Sentinel Dashboard** บนหน้าจอ Desktop
+3. **การรันชุดทดสอบ Red-Team & MITRE ATT&CK Audit:**
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\core\Invoke-RedTeamAudit.ps1
+   ```

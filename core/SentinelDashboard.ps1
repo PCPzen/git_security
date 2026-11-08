@@ -27,11 +27,39 @@ if ((-not (Test-Path $ConfigFile)) -and (Test-Path $PortableCfg)) {
     Copy-Item -Path $PortableCfg -Destination $ConfigFile -Force
 }
 
+$dashNative = @"
+using System;
+using System.Runtime.InteropServices;
+namespace SentinelDashboardNative {
+    public static class ProcessControl {
+        [DllImport("ntdll.dll", SetLastError = true)]
+        private static extern int NtResumeProcess(IntPtr processHandle);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+        public static bool ThawProcess(int pid) {
+            IntPtr hProc = OpenProcess(0x0800, false, pid);
+            if (hProc == IntPtr.Zero) return false;
+            try { return (NtResumeProcess(hProc) == 0); }
+            finally { CloseHandle(hProc); }
+        }
+    }
+}
+"@
+try {
+    if (-not ("SentinelDashboardNative.ProcessControl" -as [type])) {
+        Add-Type -TypeDefinition $dashNative -Language CSharp -ErrorAction SilentlyContinue
+    }
+} catch {}
+
+$script:SentinelEntropyBytes = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+
 function Protect-DpapiString([string]$PlainText) {
     if ([string]::IsNullOrWhiteSpace($PlainText)) { return "" }
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
-        $enc   = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        $enc   = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
         return [Convert]::ToBase64String($enc)
     } catch { return "" }
 }
@@ -40,14 +68,19 @@ function Unprotect-DpapiString([string]$CipherBase64) {
     if ([string]::IsNullOrWhiteSpace($CipherBase64)) { return "" }
     try {
         $enc   = [Convert]::FromBase64String($CipherBase64)
-        $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-        return [System.Text.Encoding]::UTF8.GetString($bytes)
+        try {
+            $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            return [System.Text.Encoding]::UTF8.GetString($bytes)
+        } catch {
+            $bytesLegacy = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            return [System.Text.Encoding]::UTF8.GetString($bytesLegacy)
+        }
     } catch { return "" }
 }
 
 function New-AuthenticatedStopToken {
     try {
-        $wdPid = "ANY"
+        $wdPid = "0"
         if (Test-Path $PidFile) {
             $rawPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
             if ($rawPid -and ($rawPid.Trim() -match '^\d+$')) { $wdPid = $rawPid.Trim() }
@@ -131,7 +164,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Security Sentinel Ultra v5.0 - Cyber-EDR Command Center" Height="830" Width="1080"
+        Title="Security Sentinel Ultra v6.0 - Cyber-EDR Command Center" Height="830" Width="1080"
         WindowStartupLocation="CenterScreen" Background="#060911" FontFamily="Segoe UI"
         Foreground="#E2E8F0">
     <Window.Resources>
@@ -217,7 +250,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
                         </Border>
                         <TextBlock Text="SECURITY SENTINEL ULTRA" FontSize="22" FontWeight="Bold" Foreground="#38BDF8" VerticalAlignment="Center"/>
                         <Border Background="#1E1B4B" BorderBrush="#4338CA" BorderThickness="1" CornerRadius="4" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="v5.0 RED-TEAM HARDENED" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
+                            <TextBlock Text="v6.0 ENTERPRISE TELEMETRY" FontSize="11" FontWeight="Bold" Foreground="#818CF8"/>
                         </Border>
                     </StackPanel>
                     <TextBlock Text="Autonomous Endpoint Defense | Real-Time Hardware &amp; Process Telemetry | Response Engine | SHA-256 VT &amp; Discord Integration" FontSize="12" Foreground="#94A3B8" Margin="0,5,0,0"/>
@@ -405,7 +438,7 @@ $script:compInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
             <!-- Left Emergency Controls -->
             <StackPanel Grid.Column="0" Orientation="Horizontal">
                 <Button x:Name="BtnKillswitch" Content="[KILLSWITCH] Emergency Cut Network" Background="#991B1B" BorderBrush="#EF4444" Margin="0,0,7,0"/>
-                <Button x:Name="BtnThaw" Content="[CLEAR STATE] Reset Freeze Flag" Background="#1E293B" BorderBrush="#475569"/>
+                <Button x:Name="BtnThaw" Content="[RESUME / ROLLBACK] Thaw PID or Restore" Background="#1E293B" BorderBrush="#475569"/>
             </StackPanel>
 
             <!-- Right Standard Controls -->
@@ -656,7 +689,7 @@ $btnTestAlert.Add_Click({
     $balloon = New-Object System.Windows.Forms.NotifyIcon
     $balloon.Icon = [System.Drawing.SystemIcons]::Shield
     $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-    $balloon.BalloonTipTitle = "Security Sentinel Ultra v5.0"
+    $balloon.BalloonTipTitle = "Security Sentinel Ultra v6.0"
     $balloon.BalloonTipText = "Telemetry & Notification System is 100% operational!"
     $balloon.Visible = $true
     $balloon.ShowBalloonTip(4000)
@@ -668,18 +701,18 @@ $btnTestAlert.Add_Click({
         try {
             $body = @{
                 username = "Security Sentinel Ultra EDR"
-                content  = "**[TEST] Security Sentinel Ultra v5.0 - Telemetry & Webhook Verified!**"
+                content  = "**[TEST] Security Sentinel Ultra v6.0 - Telemetry & Webhook Verified!**"
                 embeds   = @(
                     @{
                         title       = "[TIER 1-5] Endpoint Telemetry & Webhook Active"
-                        description = "Your PC is actively guarded by **Security Sentinel Ultra v5.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
+                        description = "Your PC is actively guarded by **Security Sentinel Ultra v6.0**. Real-time security alerts and SHA-256 Threat Intel will be delivered here."
                         color       = 1096065
                         fields      = @(
                             @{ name = "Endpoint";           value = "$env:COMPUTERNAME ($env:USERNAME)";  inline = $true },
                             @{ name = "System CPU / RAM";   value = "CPU: $($txtSysCpuPct.Text) | RAM: $($txtSysRamPct.Text)"; inline = $true },
                             @{ name = "Sentinel Footprint"; value = "$($txtSentinelMetrics.Text)";        inline = $true }
                         )
-                        footer      = @{ text = "Security Sentinel Ultra v5.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
+                        footer      = @{ text = "Security Sentinel Ultra v6.0 | Master Architecture Edition | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
                     }
                 )
             } | ConvertTo-Json -Depth 6
@@ -793,14 +826,33 @@ $btnKillswitch.Add_Click({
     Update-DashboardStatus
 })
 
-# Button: Clear Frozen Flag
+# Button: Pillar 5 Safe Response - Thaw/Resume Frozen Process (NtResumeProcess) & Quarantine Rollback
 $btnThaw.Add_Click({
     if (Test-Path $FrozenFile) {
         $fPid = (Get-Content $FrozenFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+        $resumed = $false
+        if ($fPid -match '^\d+$' -and ("SentinelDashboardNative.ProcessControl" -as [type])) {
+            $resumed = [SentinelDashboardNative.ProcessControl]::ThawProcess([int]$fPid)
+        }
         Remove-Item $FrozenFile -Force -ErrorAction SilentlyContinue
-        Append-DashboardLog "[TIER 3] Cleared frozen process state tracking for PID $fPid."
+        Append-DashboardLog "[PILLAR 5] NtResumeProcess executed on PID $fPid (Resumed=$resumed) & cleared freeze state."
     } else {
-        Append-DashboardLog "[TIER 3] No frozen process currently queued."
+        $qManifest = Join-Path $QuarDir "quarantine_manifest.json"
+        if (Test-Path $qManifest) {
+            try {
+                $mItems = @(Get-Content $qManifest -Raw -Encoding UTF8 | ConvertFrom-Json)
+                if ($mItems.Count -gt 0) {
+                    $lastItem = $mItems[-1]
+                    if ((Test-Path $lastItem.QuarantinedPath) -and $lastItem.OriginalPath) {
+                        Move-Item -Path $lastItem.QuarantinedPath -Destination $lastItem.OriginalPath -Force -ErrorAction Stop
+                        Append-DashboardLog "[PILLAR 5] Rolled back / restored quarantined file to: $($lastItem.OriginalPath)"
+                        Update-DashboardStatus
+                        return
+                    }
+                }
+            } catch {}
+        }
+        Append-DashboardLog "[PILLAR 5] No frozen process or pending quarantine rollback queued."
     }
     Update-DashboardStatus
 })

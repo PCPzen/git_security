@@ -1,60 +1,51 @@
 ========================================================================
-   SECURITY SENTINEL ULTRA v5.0 - Red-Team Hardened Portable EDR
+   SECURITY SENTINEL ULTRA v6.0 - Enterprise Telemetry & Behavioral EDR
 ========================================================================
 
-แพ็กเกจชุดป้องกันมัลแวร์ระดับ EDR แบบ "Portable 100%" สามารถนำไปติดตั้งลงเครื่องอื่นผ่าน Flash Drive
-หรือใช้กู้ชีพ/ป้องกันเครื่องตัวเอง โดยไม่ต้องต่ออินเทอร์เน็ตในการบล็อกมัลแวร์!
+แพ็กเกจชุดป้องกันมัลแวร์ระดับ EDR แบบ "Portable 100%" พัฒนาตามกรอบ 6 Pillars:
+Kernel/Event Telemetry, Live Memory Forensics, External Code Integrity,
+Behavioral Correlation, Safe Automated Response และ Red-Team Audit Suite
 
 ------------------------------------------------------------------------
-[วิธีติดตั้ง] (ทำงานใน 1 คลิก):
+[วิธีติดตั้ง] (แนะนำให้คลิกขวา Run as administrator):
 ------------------------------------------------------------------------
-1. ดับเบิ้ลคลิก (หรือคลิกขวา Run as administrator):
-   -> "1-Click-Install.bat"
-   ระบบจะติดตั้งเอนจิน v5.0 (Tier 1-5 + Guardian Twin + Kernel DACL + NTFS ACL Lock),
-   ตั้งค่าเปิดทำงานพร้อม Windows, และสร้างไอคอน "Security Sentinel Dashboard" ไว้บน Desktop ทันที
+1. คลิกขวาที่ไฟล์ "1-Click-Install.bat" -> เลือก "Run as administrator"
+   - เมื่อรันด้วยสิทธิ์ Admin ระบบจะติดตั้งลง C:\Program Files\SecuritySentinel
+   - ล็อกสิทธิ์ไฟล์ .ps1 ด้วย icacls (ป้องกัน User Malware แก้ไขสคริปต์)
+   - บันทึกค่าแฮช Trust Anchor ลงใน HKLM Registry และเปิด SACL Event 4663
 
 2. เปิดหน้าต่างควบคุม Command Center Dashboard:
    -> ดับเบิ้ลคลิกไอคอนบน Desktop หรือกด "Sentinel-Dashboard.bat"
 
-3. ตั้งค่าการแจ้งเตือน Discord Webhook (เข้ารหัสด้วย DPAPI อัตโนมัติ):
-   -> ใน Dashboard จะมีช่อง "[WEBHOOK] Notification URL:"
-   -> นำ Webhook URL จากห้อง Discord ของคุณมาวาง แล้วกด "[SAVE] Save Config"
-   -> ระบบจะเข้ารหัส Webhook ด้วย Windows DPAPI ทันที (ไม่เก็บเป็น Plaintext)
-   -> กดปุ่ม "[TEST] Test Notification" เพื่อทดสอบการแจ้งเตือนทันที!
-
-4. การถอนการติดตั้งอย่างสมบูรณ์:
-   -> ดับเบิ้ลคลิก "1-Click-Uninstall.bat"
+3. การรันชุดทดสอบจำลองการโจมตี (Red-Team Self-Audit):
+   -> รันไฟล์ core\Invoke-RedTeamAudit.ps1 ด้วย PowerShell
 
 ------------------------------------------------------------------------
-[9 การอัปเกรดระดับ Red-Team Hardened ใน v5.0]:
+[6 แกนหลักที่อัปเกรดใน v6.0 Enterprise Edition]:
 ------------------------------------------------------------------------
-1. Real Kernel DACL Self-Defense (SetKernelObjectSecurity):
-   - เขียนกฎปฏิเสธการสั่งปิดโปรเซส (Deny Terminate / Suspend / VM Write) ลงใน Kernel Handle จริง
-   - ป้องกันมัลแวร์ระดับ User สั่งปิด Watchdog และ Guardian Twin
+1. Deep Event Telemetry (Event ID 4104 & SACL 4663 XML Attribution):
+   - ตรวจจับ PowerShell ScriptBlock ในหน่วยความจำ (Event 4104)
+   - แยกวิเคราะห์ XML ของ Event 4663 ระบุชื่อโปรเซสและ PID ที่แอบอ่านไฟล์ Canary
 
-2. True Live Process RAM Forensics (VirtualQueryEx + ReadProcessMemory):
-   - สแกนหน่วยความจำเสมือน (Virtual Memory) ของโปรเซสต้องสงสัยโดยตรง
-   - ดึงลิงก์เซิร์ฟเวอร์แฮกเกอร์ (C2), Discord Webhook และ Telegram Token ที่ถูกถอดรหัสอยู่ใน RAM
+2. Live Memory Forensics & Injection Scanner:
+   - สแกน RAM ด้วย VirtualQueryEx + ReadProcessMemory ดึงลิงก์ C2/Webhook
+   - ตรวจจับ MEM_PRIVATE RWX Pages และส่วนหัวไฟล์ MZ/PE ที่ซ่อนใน RAM (Reflective PE)
 
-3. Cryptographic DPAPI Stop-Token (graceful_stop.token):
-   - ยกเลิกไฟล์ graceful_stop.flag แบบเก่า เปลี่ยนเป็นโทเคนเข้ารหัส DPAPI ผูกกับเวลาและ PID
-   - มัลแวร์ไม่สามารถสร้างไฟล์หลอกเพื่อสั่งปิดระบบได้อีกต่อไป
+3. External Code Integrity & Hardened DACL:
+   - ปฏิเสธสิทธิ์ WRITE_DAC (0x00040000) และ WRITE_OWNER (0x00080000) ใน DACL
+   - ตรวจสอบแฮช SHA-256 เทียบกับ Registry IntegrityAnchor และ manifest.json
+   - โทเคนสั่งปิดระบบผูกกับ Custom Entropy และต้องตรงกับหมายเลข PID ของ Watchdog จริง
 
-4. Zero Command-Line Bypass & SHA-256 Integrity Check:
-   - ยกเลิกการข้ามการตรวจด้วยชื่อใน Command Line เปลี่ยนเป็นตรวจ PID จริงและเช็กแฮช SHA-256 ของสคริปต์
+4. Behavioral Correlation & Base64 Command Decoder + 28 Persistence Vectors:
+   - ถอดรหัส Base64 (-enc / FromBase64String) ก่อนคำนวณคะแนนความเสี่ยงเสมอ
+   - แก้ไขกฎ Rule 1 + Rule 2: หากเบราว์เซอร์เปิด PowerShell แบบเข้ารหัส จะได้คะแนน >= 75/100
+     แจ้งเตือน CRITICAL เสมอ และสั่ง Freeze ทันทีโดยไม่ข้ามกฎ
+   - ตรวจสอบ Persistence จริงครบ 28 จุด (Run/RunOnce, Winlogon, IFEO, WMI, Tasks, PSProfile ฯลฯ)
 
-5. Anti-EoP NTFS ACL Hardening:
-   - ล็อกสิทธิ์ไฟล์ .ps1 ด้วย icacls เมื่อติดตั้งด้วยสิทธิ์ Admin ป้องกันมัลแวร์แอบแก้สคริปต์เพื่อยกระดับสิทธิ์
+5. Safe Automated Response (NtResumeProcess & Signed Binary Safety):
+   - ปกป้องตัวติดตั้งโปรแกรมที่มีใบรับรองดิจิทัลถูกต้องใน %TEMP% ไม่ให้ถูก Freeze ผิดพลาด
+   - ปุ่ม [RESUME / ROLLBACK] เรียกใช้ NtResumeProcess ปลดแช่แข็งโปรเซสจริงและกู้คืนไฟล์กักกัน
 
-6. Composite PID|CreationDate Tracking & Dead-PID Pruning:
-   - ป้องกันช่องโหว่ PID Reuse เมื่อ Windows นำเลข PID เก่ากลับมาใช้ซ้ำ
-
-7. Strict Distinguished Name (DN) & CA Issuer Authenticode Check:
-   - ตรวจสอบใบรับรองดิจิทัลทั้งชื่อเต็ม (CN=/O=) และผู้ออกใบรับรอง (Root/Intermediate CA)
-
-8. Risk-Score Gated Auto-Freeze & ScanIntervalSeconds:
-   - คำนวณคะแนนความเสี่ยง (Heuristic Risk Score) ก่อนตัดสินใจ Freeze ลดปัญหา False Positive กับเกมและ Discord
-
-9. DPAPI Secret Encryption & SACL Canary Read-Audit (Event ID 4663):
-   - เข้ารหัส Discord Webhook / VirusTotal Key ใน config.json ด้วย DPAPI และตรวจจับการแอบอ่านไฟล์กับดัก
+6. Red-Team Testing (Invoke-RedTeamAudit.ps1):
+   - ชุดทดสอบอัตโนมัติ 6 ข้อตามกรอบ MITRE ATT&CK ยืนยันความถูกต้องของทุกกลไก
 ========================================================================

@@ -1,31 +1,33 @@
 # =====================================================================
-# Security Sentinel Ultra v5.0 - Uninstaller
-# Clean Removal, DPAPI Authenticated Stop-Token & ACL Reset
+# Security Sentinel Ultra v6.0 - Uninstaller
+# Clean Removal, Custom-Entropy DPAPI Stop-Token & ACL Reset
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
-$SentinelDir = "$env:LOCALAPPDATA\SecuritySentinel"
-$PidFile     = "$SentinelDir\sentinel.pid"
-$GuardianPid = "$SentinelDir\guardian.pid"
-$StopTokenF  = "$SentinelDir\graceful_stop.token"
+$StateDir    = "$env:LOCALAPPDATA\SecuritySentinel"
+$ProgDir     = "$env:ProgramFiles\SecuritySentinel"
+$PidFile     = "$StateDir\sentinel.pid"
+$GuardianPid = "$StateDir\guardian.pid"
+$StopTokenF  = "$StateDir\graceful_stop.token"
+$Entropy     = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL ULTRA v5.0 - UNINSTALLER             " -ForegroundColor Yellow
+Write-Host "   SECURITY SENTINEL ULTRA v6.0 - UNINSTALLER             " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Generate DPAPI Authenticated Stop-Token & Stop processes
-Write-Host "`n[1/4] Disarming Guardian Twin (DPAPI Stop-Token) & Stopping processes..." -ForegroundColor White
-if (Test-Path $SentinelDir) {
+Write-Host "`n[1/4] Disarming Guardian Twin (Custom-Entropy Stop-Token) & Stopping processes..." -ForegroundColor White
+if (Test-Path $StateDir) {
     try {
         $wdPid = if (Test-Path $PidFile) { (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim() } else { "0" }
         $payload = "STOP|$wdPid|$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-        $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $Entropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
         [System.IO.File]::WriteAllText($StopTokenF, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
     } catch {}
-    "STOP" | Out-File -FilePath "$SentinelDir\graceful_stop.flag" -Encoding UTF8 -Force
+    "STOP" | Out-File -FilePath "$StateDir\graceful_stop.flag" -Encoding UTF8 -Force
 }
 Start-Sleep -Milliseconds 400
 
@@ -43,10 +45,16 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.
 }
 Write-Host "  -> Active Watchdog & Guardian Twin processes stopped." -ForegroundColor Green
 
-# 2. Remove Scheduled Task
-Write-Host "`n[2/4] Removing Scheduled Task from Windows..." -ForegroundColor White
+# 2. Remove Scheduled Task & Registry Trust Anchors
+Write-Host "`n[2/4] Removing Scheduled Task & Integrity Anchors..." -ForegroundColor White
 Unregister-ScheduledTask -TaskName "SecuritySentinelWatchdog" -Confirm:$false -ErrorAction SilentlyContinue
-Write-Host "  -> Task 'SecuritySentinelWatchdog' removed." -ForegroundColor Green
+Remove-Item "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "HKLM:\SOFTWARE\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+if (Test-Path $ProgDir) {
+    icacls "$ProgDir\*.ps1" /reset /T /C /Q 2>&1 | Out-Null
+    Remove-Item $ProgDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+Write-Host "  -> Task 'SecuritySentinelWatchdog' and Trust Anchors removed." -ForegroundColor Green
 
 # 3. Remove Desktop Shortcut
 Write-Host "`n[3/4] Removing Desktop shortcut..." -ForegroundColor White
