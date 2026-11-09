@@ -1,6 +1,6 @@
 # =====================================================================
 # Security Sentinel Ultra v8.0 - Pester Unit Test Suite
-# Tests: DPAPI, Anti-Bypass, Phishing Macro Anomaly, Zero-Trust Safe-Mode, Canary
+# Tests: DPAPI, Anti-Bypass, Phishing, Parent-Spoofing Safe-Mode, Token Forgery
 # =====================================================================
 
 $ScriptRoot = Split-Path -Parent $PSScriptRoot
@@ -32,7 +32,7 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
         }
     }
 
-    Context "2. Dashboard Exemption Anti-Bypass (Fix for Vulnerability #1)" {
+    Context "2. Dashboard Exemption Anti-Bypass" {
         It "Should strictly reject encoded command payloads attempting to bypass by appending script name" {
             $fakeBypassCmd = "powershell.exe -enc VGVzdFBheWxvYWQ= SentinelDashboard.ps1"
             $isVerified = Test-IsVerifiedSentinelScript -CommandLine $fakeBypassCmd
@@ -78,7 +78,7 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
         }
     }
 
-    Context "4. Safe-Mode Zero-Trust Name-Spoofing Immunity (Fix for Vulnerability #2)" {
+    Context "4. Safe-Mode Zero-Trust Parent & Spoofing Defense (Real Inspect-SingleProcess)" {
         It "Should reject an unsigned malware binary in Temp named 'node.exe' from getting silent Safe-Mode pass" {
             $fakeNodeTemp = "C:\Users\victim\AppData\Local\Temp\node.exe"
             $triage = Get-ForensicTriage -ProcessId 0 -FilePath $fakeNodeTemp `
@@ -89,12 +89,80 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
             $triage.Reasons | Should Contain "UnsignedBinary(+25)"
             $triage.Reasons | Should Contain "HighRiskPath(+20)"
         }
+
+        It "Should reject Safe-Mode pass via Inspect-SingleProcess when parent steam.exe is spoofed in Temp" {
+            $childProc = [PSCustomObject]@{
+                ProcessId        = 8882
+                Name             = "worker.exe"
+                ExecutablePath   = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+                CommandLine      = "worker.exe --task"
+                ParentProcessId  = 7772
+            }
+            $spoofedMap = @{
+                7772 = [PSCustomObject]@{
+                    ProcessId      = 7772
+                    Name           = "steam.exe"
+                    ExecutablePath = "C:\Users\victim\AppData\Local\Temp\steam.exe"
+                }
+            }
+            $res = Inspect-SingleProcess -p $childProc -procMap $spoofedMap
+            $res.Action | Should Not Be "AllowedWorkGamingSafeMode"
+        }
+
+        It "Should grant Safe-Mode pass via Inspect-SingleProcess when parent is genuine in Program Files" {
+            $childProc = [PSCustomObject]@{
+                ProcessId        = 8883
+                Name             = "worker.exe"
+                ExecutablePath   = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+                CommandLine      = "worker.exe --task"
+                ParentProcessId  = 7773
+            }
+            $legitMap = @{
+                7773 = [PSCustomObject]@{
+                    ProcessId      = 7773
+                    Name           = "steam.exe"
+                    ExecutablePath = "C:\Program Files (x86)\Steam\steam.exe"
+                }
+            }
+            $res = Inspect-SingleProcess -p $childProc -procMap $legitMap
+            $res.Action | Should Be "AllowedWorkGamingSafeMode"
+        }
     }
 
-    Context "5. Stop Token Security & CSPRNG Binding (Fix for Vulnerability #3)" {
+    Context "5. Stop Token Security, Token Forgery & Registry Vault Defense" {
         It "Should reject stop token generated for a different PID" {
             $valid = Test-AuthenticatedStopToken -ExpectedWatchdogPid "99999"
             $valid | Should Be $false
+        }
+
+        It "Should strictly reject stop token forged by attacker without HKLM secret" {
+            $attackerPayload = "STOP|$PID|$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+            $fakeEntropy = [System.Text.Encoding]::UTF8.GetBytes("ATTACKER_GUESS_SECRET_12345678901")
+            $enc = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($attackerPayload), $fakeEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            $tokenFile = Join-Path $StateDir "graceful_stop.token"
+            [System.IO.File]::WriteAllText($tokenFile, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
+
+            $res = Test-AuthenticatedStopToken -ExpectedWatchdogPid "$PID"
+            $res | Should Be $false
+        }
+
+        It "Should strictly reject stop token replay attack with expired timestamp" {
+            $expiredPayload = "STOP|$PID|$([DateTimeOffset]::UtcNow.AddSeconds(-120).ToUnixTimeSeconds())"
+            $enc = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($expiredPayload), $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            $tokenFile = Join-Path $StateDir "graceful_stop.token"
+            [System.IO.File]::WriteAllText($tokenFile, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
+
+            $res = Test-AuthenticatedStopToken -ExpectedWatchdogPid "$PID"
+            $res | Should Be $false
+        }
+
+        It "Should ensure Zero-Trust: No InstallSecret stored in HKCU" {
+            $hkcuSecretExists = $false
+            if (Test-Path "HKCU:\Software\SecuritySentinel\IntegrityAnchor") {
+                $val = (Get-ItemProperty -Path "HKCU:\Software\SecuritySentinel\IntegrityAnchor" -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+                if ($val) { $hkcuSecretExists = $true }
+            }
+            $hkcuSecretExists | Should Be $false
         }
     }
 
@@ -121,8 +189,8 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAXlS384MIRQy0r
-# xm2AHteRS1InfOu+bo3FMYJcR7EfC6CCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAVEgl9/wFbyjb6
+# 3SVLX5+kbCZPjiS7z0qkm1vJ2FsDV6CCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -143,12 +211,12 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIJXMiCTwXWR8i424TOD7
-# vmBOmAR0FFHvwUT72MEVT9IUMA0GCSqGSIb3DQEBAQUABIIBAFv8cOPFcOrwfCtZ
-# 15UewFCzuyZjuibPVrM4jTnPKkj5qnsECElJ2FoNxG4SFJRjWadcr7mAI1mw+ij+
-# 1PEf+NFAQ3gGqMV9u0EzGAjbeQjelbjx4j+iCpS+AbUhkZCB0du1nyc97Y68lKpV
-# swA9QJSW0o8DkAo3tC91bJjh8q3ly07KzmY9ynIky0oHIpAB3Ue0CVGKEF/Aj74q
-# sM2bHoXTZbEY8gJV1etrdMS4T1mwEH6GlmVKaN2VRYOPY6jDN5PY7MOKkTsC5Bn7
-# 9vTi4Zoyd5TUKDrJEHsInCDNES2wVX3XTMNDjjLe/1lHiL/XJFlSVsG50RfIJ5Tc
-# MOG0CiA=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIEG9sZT40Qv+QOB1ZNhO
+# 4gU+tef4QK131fnC+sppbtx9MA0GCSqGSIb3DQEBAQUABIIBAHD3hkXlIFHciTgq
+# zXBk7axcURn920lWYl8rA4UGxo0stAbwhQZz3GPLLzVe4yhCgReuPir53HOVS5th
+# 1hLQ6rz6zBw2GHFhxd4Jtfl6cuI1PWqmWjvSOz/ZZvOnpIlGB6ARWYd72kCqlMIr
+# lZKMaWoQq78dWuGO5HcrUSZalkXJXjJ73Z/lGFhWsc9D8zu2NSbYFYUWNtE3sEB0
+# m5qb06dUY94lgHW/hUC6XXREH+hN7mq8qS+cw59c78+axOuzaGmaLF3u4Xaj2pqC
+# AwjgDjd/NPbt2U+2XRsOyL5g/co+l5ExDWjAY084GwQuxYpoQIwhnmRyET3l7xeU
+# qcMLfAg=
 # SIG # End signature block

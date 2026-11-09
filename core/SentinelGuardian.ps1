@@ -89,12 +89,13 @@ try {
 } catch {}
 
 function Get-GuardianInstallationSecretBytes {
-    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regPath) {
-            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-            if ($b64) {
-                try { return [Convert]::FromBase64String($b64) } catch {}
-            }
+    # Purge legacy HKCU secret if present
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regPath) {
+        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+        if ($b64) {
+            try { return [Convert]::FromBase64String($b64) } catch {}
         }
     }
     return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
@@ -119,11 +120,10 @@ function Unprotect-DpapiString([string]$cipherBase64) {
 
 # FAIL-CLOSED TRUST ANCHOR: Never falls back to reading current file hash from disk!
 function Get-TrustedWatchdogHash {
-    foreach ($regAnchor in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regAnchor) {
-            $val = (Get-ItemProperty -Path $regAnchor -Name "SentinelWatchdog.ps1" -ErrorAction SilentlyContinue)."SentinelWatchdog.ps1"
-            if ($val) { return "$val" }
-        }
+    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regAnchor) {
+        $val = (Get-ItemProperty -Path $regAnchor -Name "SentinelWatchdog.ps1" -ErrorAction SilentlyContinue)."SentinelWatchdog.ps1"
+        if ($val) { return "$val" }
     }
     if (Test-Path $ManifestFile) {
         try {
@@ -288,8 +288,8 @@ while ($true) {
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB0Kxfj8URuhq1K
-# xrlxOA9eXHr71e2sL/sJOToK6I0sRqCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBJaNztbMUb3TDN
+# +HENhx4tv1J36utroyfl72JUALphx6CCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -310,12 +310,12 @@ while ($true) {
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIAgNIYwP5DCF1VS9n66U
-# qQASR23FXjj8bFa1q7LlM5zcMA0GCSqGSIb3DQEBAQUABIIBAEUTqvaaDbNI7TX8
-# +vugne8DYFAodWo3pKHR5acifMKQsBmGQfRynsBTFJAbGGnw5VrkU3V45XWyW6tm
-# bdoav2kDQ4sNmU7Doed/TjHOTUd/Xsw340XdzJP12slYUIxNmPq3/8mcIzD23y2J
-# OOl2D3tWm9jxyBrhz3W20mYSajmJDr5vNN2hII/bBXDXzkrptU8J3KtlLSODvyvY
-# bxpJKv18uCUeY6GMudhP42wTglSdhC3MNt3J2WKGb9cM0EOjgzM4d4SkOY0vSelD
-# Rnymu+SeVompXu2LozpZieOgk14LLcvb/400FP4DQjzJc3K8lK+m9RlNWJZqaZJc
-# DDVbv9I=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIKTzXA8EcBxt8fCd1pTE
+# +EsUEIeoQEsx/Bqj06kbEw02MA0GCSqGSIb3DQEBAQUABIIBAFpDWZ27PtNteuDd
+# eNrwcs2X8CtO99WRC8ozy38vIbssPPzf2DbRT2h7T0ppvJorWazdoeFicUYXHjVa
+# md46yoT9xvL3U9Hui4WXB+V3IYFwdbHfaCKV7YUQlxGMnJBdKIFAew4132erkVRm
+# MH58FGw+UuAX8lVOkjjrwD0S/lzQZu8XY2vD88dREJT/Db9M8y54MUYSmD8Hgd/a
+# 5KpZGJ/3FmoW3z7VRbmf+zmahrUhpg+/OsfSVFfGiicGV9mikUF2fhkG2OK9WvIh
+# 33DWY7a9lYzRZ07b+V5XZ6aYEtO8IMNuWtfeyghPCDhanzrQ6F8VVhUiA68OtNrS
+# wSbFLZE=
 # SIG # End signature block

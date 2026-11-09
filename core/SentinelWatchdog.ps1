@@ -352,23 +352,21 @@ if ((-not (Test-Path $ConfigFile)) -and (Test-Path $PortableCfg)) {
 }
 
 function Get-InstallationSecretBytes {
-    # 1. Prefer HKLM InstallSecret (Admin-writable only) when present
-    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regPath) {
-            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-            if ($b64) {
-                try { return [Convert]::FromBase64String($b64) } catch {}
-            }
+    # Zero-Trust: Purge any legacy secret from HKCU immediately
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+
+    # 1. Read exclusively from HKLM InstallSecret (Admin/SYSTEM ACL protected)
+    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regPath) {
+        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+        if ($b64) {
+            try { return [Convert]::FromBase64String($b64) } catch {}
         }
     }
-    # 2. Generate a new 256-bit CSPRNG secret if not yet initialized
+    # 2. Ephemeral 256-bit CSPRNG secret in memory (never written to HKCU!)
     $rngBytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $rng.GetBytes($rngBytes)
-    $b64New = [Convert]::ToBase64String($rngBytes)
-    $regHkcu = "HKCU:\Software\SecuritySentinel\IntegrityAnchor"
-    if (-not (Test-Path $regHkcu)) { New-Item -Path $regHkcu -Force | Out-Null }
-    Set-ItemProperty -Path $regHkcu -Name "InstallSecret" -Value $b64New -Force -ErrorAction SilentlyContinue
     return $rngBytes
 }
 
@@ -567,18 +565,16 @@ $script:SelfPath = $MyInvocation.MyCommand.Path
 
 function Get-TrustedScriptHashes {
     $hashes = @{}
-    # 1. Prefer HKLM IntegrityAnchor (Protected by Admin ACLs against user-mode modification)
-    foreach ($regAnchor in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regAnchor) {
-            $props = Get-ItemProperty -Path $regAnchor -ErrorAction SilentlyContinue
-            if ($props) {
-                foreach ($sName in @("SentinelWatchdog.ps1", "SentinelGuardian.ps1", "SentinelDashboard.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")) {
-                    if ($props.$sName -and (-not $hashes.ContainsKey($sName))) {
-                        $hashes[$sName] = "$($props.$sName)"
-                    }
+    # 1. Read exclusively from HKLM IntegrityAnchor (SYSTEM/Administrators ACL locked)
+    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regAnchor) {
+        $props = Get-ItemProperty -Path $regAnchor -ErrorAction SilentlyContinue
+        if ($props) {
+            foreach ($sName in @("SentinelWatchdog.ps1", "SentinelGuardian.ps1", "SentinelDashboard.ps1", "Sign-Scripts.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")) {
+                if ($props.$sName -and (-not $hashes.ContainsKey($sName))) {
+                    $hashes[$sName] = "$($props.$sName)"
                 }
             }
-            if ($hashes.Count -gt 0) { break }
         }
     }
     # 2. Fallback to DPAPI-sealed manifest.json (Never fallback to raw unverified disk files!)
@@ -622,11 +618,8 @@ function Initialize-CodeIntegrityTrustAnchor {
     }
     [System.IO.File]::WriteAllText($ManifestFile, ($manifestObj | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
 
-    $regPath = "HKCU:\Software\SecuritySentinel\IntegrityAnchor"
-    if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-    foreach ($k in $hashes.Keys) {
-        Set-ItemProperty -Path $regPath -Name $k -Value $hashes[$k] -Force -ErrorAction SilentlyContinue
-    }
+    # Zero-Trust: Do not mirror hashes into HKCU; purge legacy key if exists
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
     return $hashes
 }
 
@@ -1582,24 +1575,43 @@ function Inspect-SingleProcess {
     }
 
     $parentName = "unknown"
+    $parentExePath = ""
     if ($procMap -and $procMap.ContainsKey($pPid)) {
         $parentName = "$($procMap[$pPid].Name)".ToLower()
+        $parentExePath = "$($procMap[$pPid].ExecutablePath)"
     } else {
         $parentProc = Get-Process -Id $pPid -ErrorAction SilentlyContinue
-        if ($parentProc) { $parentName = "$($parentProc.ProcessName).exe".ToLower() }
+        if ($parentProc) { 
+            $parentName = "$($parentProc.ProcessName).exe".ToLower()
+            try { $parentExePath = $parentProc.Path } catch {}
+        }
     }
 
     $minScoreToFreeze = if ($script:Config.AutoFreezeMinRiskScore) { [int]$script:Config.AutoFreezeMinRiskScore } else { 85 }
     $expandedCmd      = Expand-EncodedCommandLine -RawCommandLine $cmd
     $hasObfuscation   = ($expandedCmd -match $script:ObfuscatedCmdRegex)
 
-        $isBrowserOrLauncher = ($parentName -match "^(chrome|msedge|brave|opera|firefox|discord|telegram|steam|robloxplayerbeta|robloxstudio|riotclientservices|valorant|tslgame)\.exe$")
+    $isBrowserOrLauncher = ($parentName -match "^(chrome|msedge|brave|opera|firefox|discord|telegram|steam|robloxplayerbeta|robloxstudio|riotclientservices|valorant|tslgame)\.exe$")
     $isOfficeParent      = ($parentName -match "^(winword|excel|powerpnt|outlook|msaccess|visio|mspub|eqnedt32)\.exe$")
     $isPdfParent         = ($parentName -match "^(acrord32|acrobat|foxitreader|pdfxcview)\.exe$")
     $isArchiveParent     = ($parentName -match "^(winrar|7z|7zfm|peazip|bandizip)\.exe$")
     $isScriptParent      = ($parentName -match "^(wscript|cscript|mshta|rundll32|regsvr32)\.exe$")
     $isHighRiskParent    = ($isBrowserOrLauncher -or $isOfficeParent -or $isPdfParent -or $isArchiveParent -or $isScriptParent)
-    $isWorkOrGameDev  = ($parentName -match $script:WorkAndGamingParentsRegex)
+
+    # Anti-Spoofing: Parent must NOT reside in Temp/Public/Downloads; must reside in standard program directories OR be signed!
+    $isWorkOrGameDev = $false
+    if ($parentName -match $script:WorkAndGamingParentsRegex) {
+        $isParentSuspicious = ($parentExePath -and ($parentExePath -match "\\AppData\\Local\\Temp\\|\\Users\\Public\\|\\Downloads\\"))
+        if (-not $isParentSuspicious) {
+            $isStandardParentDir = ($parentExePath -and ($parentExePath -match "(?i)^[a-z]:\\(Program Files|Program Files \(x86\)|Windows|Users\\[^\\]+\\AppData\\Local\\Programs)\\"))
+            if ($isStandardParentDir) {
+                $isWorkOrGameDev = $true
+            } elseif ($parentExePath -and (Test-Path $parentExePath -PathType Leaf)) {
+                $pSig = Get-BinarySignatureTrust -FilePath $parentExePath
+                if ($pSig.IsValidSigned) { $isWorkOrGameDev = $true }
+            }
+        }
+    }
     $isShellOrLolbin  = ($cName -match "^(powershell|pwsh|cmd|mshta|wscript|cscript|regsvr32|certutil|bitsadmin)\.exe$")
 
     # =================================================================
@@ -1675,8 +1687,9 @@ function Inspect-SingleProcess {
         $hasHardMaliciousProof = (($forensics.C2Indicators.Count -gt 0) -or ($forensics.UnbackedPeHeaders -gt 0) -or $hasObfuscation)
 
         if ($sigTrust.IsValidSigned) {
-            # Catch Signed Malware ONLY if it has proven C2 / Reflective PE / Obfuscation!
-            if ($hasHardMaliciousProof -and ($forensics.RiskScore -ge 85)) {
+            # Catch Signed Threats if proven C2 / Reflective PE / Obfuscation OR spawned by Phishing Parent!
+            $isPhishingExploit = ($isOfficeParent -or $isPdfParent -or $isArchiveParent)
+            if (($hasHardMaliciousProof -or $isPhishingExploit) -and ($forensics.RiskScore -ge 85)) {
                 $wasFrozen = $false
                 $actionMsg = "Signed Malware with C2/Injection Flagged"
                 if ($script:Config.AutoFreezeSuspiciousProc -and ("SentinelNative.KernelControl" -as [type])) {
@@ -2191,8 +2204,8 @@ while ($true) {
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDJmwGVJ3UkAQdR
-# gAgdi/3mKklXYuuu4+krQE4QJ5dII6CCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAHzYSfW6eyjAE7
+# 883NHtQ2TzzGnx9BG5YhZ0dFue/ETaCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -2213,12 +2226,12 @@ while ($true) {
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIBhPle4zjY6ZajwJzufj
-# nDDokeYYDEPb2AmKAnKTUpnlMA0GCSqGSIb3DQEBAQUABIIBAJ1KjBpsHjUm3B6p
-# Bg09JTdZS9ukbRmTt25cTkUjYupQM5IBTZLyYHTD69xkIJ19i7b7NjWHZ9+ImMMF
-# BcWtmx8/j/5k50rTTtxj7xgYr1SDgUcl7T5sLmZ4cAab3HVQydbtUZLRazJkg4+q
-# tOupRjanyAwfELVtyFvmjWrL2uDX5KabSrNou0w7b8WmmOaGxOXOZuBfHkcgkx5P
-# 88IiDUb93CerG5MHmgZRrzkKkLsVC4uHqM67PFn1iH4A3H5AFOJArLkkaFSrHiQ2
-# yNx7rufTjdbx6+rr3rADBxt9N4V0W470VKWetZuVlaHtGN+OIYHamgNh+dYtI5tq
-# 1xC1DHI=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIGV2en6I1YrWVHPX8im7
+# f3F+gSCtzzpO6qeyyC5ZALKxMA0GCSqGSIb3DQEBAQUABIIBALLZVQq3yn3X0f1E
+# 0S9SvdmLMVPv0QAyOf48Z6wRffxbOYMQ6ai3Bfo9ACIonIVapbcBPsdPC7HOb65r
+# aaxcHuNcYAsxtfxodx43auJYCsKYZO1I86QWCBQctP92I2rzrpLyPJXKVzIagn5f
+# J+Xc4L2aaQUO7sIdDM5HKs4kKmrm8XYA/g9AhmxhCWXKyArKQ71jgN5BorHuAqWA
+# KYEclyMOmcKYK46x0Fs8KTVQL8E7rjkZ1M5w03uRuMfqaItfKm5+Y09CBVPk7s2X
+# PGXcjcnW3J9Jl4el+lZSqBZSFEXlB7L+68kDl3SbcvfUbtzk4V6mGVEm81gPqFPm
+# 8llTJ+4=
 # SIG # End signature block

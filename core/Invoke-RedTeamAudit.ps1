@@ -117,7 +117,7 @@ $mockWorkPs = [PSCustomObject]@{
 $resWorkPs = Inspect-SingleProcess -p $mockWorkPs -procMap @{}
 
 # 2C: Developer IDE (Code.exe) running an unsigned helper in %TEMP%
-$mockDevParent = @{ 99012 = [PSCustomObject]@{ ProcessId = 99012; Name = "Code.exe" } }
+$mockDevParent = @{ 99012 = [PSCustomObject]@{ ProcessId = 99012; Name = "Code.exe"; ExecutablePath = "C:\Users\tester\AppData\Local\Programs\Microsoft VS Code\Code.exe" } }
 $mockDevTemp = [PSCustomObject]@{
     ProcessId       = 99013
     ParentProcessId = 99012
@@ -278,8 +278,8 @@ if ($failed -gt 0) { exit 1 }
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDhLt3gUJfBM5aA
-# QXYj7xEHI/0qod0Rc3g+5T7DnXeiiaCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB9yVkX1v21tJ9/
+# UX/b0hTVMdG0Hh3GQqHYV8M4PiXrZqCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -300,12 +300,12 @@ if ($failed -gt 0) { exit 1 }
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIH6/y2+TRFJzgTQ3PBHi
-# AkKThjdrApz+KbY/Ky1xxXSZMA0GCSqGSIb3DQEBAQUABIIBAHrJCkfIE+3ejpU7
-# Rd8pSeC7ikSp2yIIniAe+Q0tXmQWgc9FXd8ZlhzsHzIiULM/UmEVAJ+NB/Q/D6Un
-# IewHolqElCAF/GvEi0s4QkpO1V0uxmIwODzLRZU4RIllVnZmnmDoDhDRB7zbIXdZ
-# XdzxfbDNgTCo7Qtbxls1pdI0TR+7rKOydImqUZneJvy/0RmLjVhid0hwC3ZDYB7V
-# JuPY/OwjWLDPpvNyKG+T0saHBgmipfQSmDpIwH0ehru8m0VD9OLB3QPGktlsJ4eL
-# 2NTswnXyhPMaK/BsjWz/D5EBZ6S/JgMRghFsH2hoHerug7ff2m3cGa7/H8gHzDoZ
-# ObXbxds=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIBNeO2vM9G/GSnZYkym8
+# HWojB3zqMzC7MX93aLkwzGJyMA0GCSqGSIb3DQEBAQUABIIBAKQtfYOHUX3pSC8G
+# F3o4fdsNM5Pla7BgImxliirRFIJy4sB+JEFtDKj8/symjjyFefDMH+9auxfyEH8J
+# VDjhUJbnmZ4gqsE4MqKXquzns1OCCt5MUY/QrtWW85+A0tJHTxQg1H/HjU8devZb
+# kY7SCi6iHWJI6qfHCknbGVqXC5A6HWFFPP92p/UVeEBxhLr1hEGMv9J1XhwG/n5t
+# Jsrr0pkegy3EnNLoP4R53XDr0x9JHq7gB6lkjCbGyK+8VxTC0EdMmLgESDqr+R7t
+# Op9e1+h364RocbB58nh4XuL9jNp0WvxcBElPOpY+401Vu/GGV+Fk6EiLNnkKkqFB
+# g49RSvo=
 # SIG # End signature block

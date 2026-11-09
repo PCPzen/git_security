@@ -1,5 +1,5 @@
 # =====================================================================
-# Security Sentinel Ultra v7.0 - Uninstaller
+# Security Sentinel Ultra v8.0 - Enterprise Uninstaller
 # Clean Removal, CSPRNG Authenticated Stop-Token & ACL Reset
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -13,12 +13,12 @@ $GuardianPid = "$StateDir\guardian.pid"
 $StopTokenF  = "$StateDir\graceful_stop.token"
 
 function Get-InstallSecret {
-    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regPath) {
-            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-            if ($b64) {
-                try { return [Convert]::FromBase64String($b64) } catch {}
-            }
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regPath) {
+        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+        if ($b64) {
+            try { return [Convert]::FromBase64String($b64) } catch {}
         }
     }
     return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
@@ -85,8 +85,8 @@ Write-Host "Security Sentinel has been completely removed from this PC."
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCApvCg5scvGHI/w
-# H1JUCGyn+BEnrQNdnfU012fungxUTqCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCnZu/t5Qj7bMAr
+# b1zWg5UQpcyrWt2odv98BGxZIgT5/qCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -107,12 +107,12 @@ Write-Host "Security Sentinel has been completely removed from this PC."
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIClKYG/agYxNZK29o51F
-# S6Kpmr+naj+ozVOmXf8K4bJXMA0GCSqGSIb3DQEBAQUABIIBAEYBxaiQbJc7rP9C
-# A4ksRhqYiSlxJANrWQoxPdz677IwWSO5xvGbVXqyZWTCmTbvLWNntPUOOz8614Nv
-# DmffSbrX6vre1a8z0HJrqZh3BT17Jq8UxujrSeBhPeaXSsnjRb9eNzuUAP/+69nc
-# AF6XDK8NypfoGuJloVHw9xEMD5jBUW/3IxxDOOU4xyI2upCrBsMdMe5VzBmqLfyn
-# yyhj4hWvmHn2B56RcGUze92pnODM2WGcLhJRjpmcSOdQo+qdz3+vmLcyWTRBuFO+
-# lVenLzZpygDBIUQQb9gWVhaTcgS8eun3Xl8FfmM8sKpLgjXW6LnhNaFzPIF+bRU5
-# qtYBVN0=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIOvaxEvrHGKLqwSQ3jMu
+# t1RZE6FlWt7w9b4ItEgkojmoMA0GCSqGSIb3DQEBAQUABIIBAKHDfHrMxYExI8sZ
+# D+FenhQZWT5vhbZbx136dJN7kiJ8DLECRAcGBmPnwVTsCvmu1Zk3yzjl/3l8bA1U
+# WWVe1hWa5tCYinc5rjduqR2b5kbPDpHCZMjUMIWYv2+vHPgaGCUmgfVYM/lv12kh
+# 6TPAL3v+AQwGsdJONdleo+PKHV/ASVAYYtjFNaM0yhTbjOnkmzDIWrCKucANDZlQ
+# ykvOGQKm3x+31NwRQFr7Z4IkkimeA43lzegzt68Af9lTgSKY7IGKpI+xcQradRkp
+# DZAMCKmQs6zysNsUJG9Vx8796coac2NildOJ4dXkShJnMCKFAsiGRMMFALWaMBf+
+# MqOckxs=
 # SIG # End signature block

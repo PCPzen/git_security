@@ -40,12 +40,12 @@ function Thaw-FrozenProcess([int]$TargetPid) {
 }
 
 function Get-DashboardInstallSecretBytes {
-    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regPath) {
-            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-            if ($b64) {
-                try { return [Convert]::FromBase64String($b64) } catch {}
-            }
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regPath) {
+        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+        if ($b64) {
+            try { return [Convert]::FromBase64String($b64) } catch {}
         }
     }
     return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
@@ -909,8 +909,8 @@ $window.ShowDialog() | Out-Null
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBKDd+5DcEY96B6
-# 6MRuwCh1kkKfnltiZpc5+gZbV5TtcKCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAt6fS3uFDTqjKj
+# fIKj34OlIUox3gSX6qMFbRCeCupadKCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -931,12 +931,12 @@ $window.ShowDialog() | Out-Null
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIOAA/Oezb2+pxhrSzLd7
-# I6mgYO6QFF4/GXV9G1/FxonEMA0GCSqGSIb3DQEBAQUABIIBAGJeuH3d8jQXChK2
-# D5oskTpz3cJCMGew82vFxSl3K9EEZn+JuGu0NJM3+mIwIbGi14UsrIghMWd9vGya
-# ZimbxfKHj2jdZ6tPYXcIYVj7pZAUSVXiKxe6+Pv4b9GE887wNnQIEhGC5CBAqp0z
-# rr13LMLEYPSLzJ0Vpg+E5z525Xi/eboD2px5QRKoIz9vEp9CYU+fZz+m02jyl8RZ
-# EjLLYoY3unn5uNuojggktOyDGPtJoPEWyd2aMPNoigtxgES9mX5pzY8owOL0uxXR
-# mKbr9vMv4BGKjeku9I5mqYX3VVGLFCHIh9tQgC6Sb9e20LH6WorJSmXeZgI2XRGU
-# 5n75cgs=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEICOKXMbwiYVlY7RTzYOs
+# rgV/PkqtbKGIY3W8fTR6kgnKMA0GCSqGSIb3DQEBAQUABIIBAKwc+mLF3nnmVgsS
+# r1i3zWEhPh6OdY6ffMgI3P1hcJpI/bIJyGRF+u/BcyQVJvUqYsDkfnsAJ/XkMUep
+# 3bMzcRq0JI/h3orSj4eHza5JSp4FsF2fFSOCMGNZ9PpXO4cZcaTgV5j6yb6Zxv18
+# IE1KZiZ7jNbTFjEZr7H9Kk7ZVw0ZXxIcBdoiWeImbHvnXow9hhnfnpn4FIZQ/uC9
+# PaCLKmQj0awBLSJ5XB9Fk3xaov3llTAha+5bAelHXgbVe7i+O3GZscfP04fSxoTg
+# 5JkleXHMlakyMZNVOGcfUdtftVLWmi4q388fN/o1LINggNo7Xhl8cYs65l3IRoW5
+# 2TjLAJ4=
 # SIG # End signature block

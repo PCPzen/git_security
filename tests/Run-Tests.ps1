@@ -1,10 +1,11 @@
 # =====================================================================
 # Security Sentinel Ultra v8.0 - Automated Test Runner
 # Zero-dependency standalone test execution engine
+# Tests: DPAPI, Anti-Bypass, Phishing, Parent-Spoofing Safe-Mode, Token Forgery
 # =====================================================================
 
 Write-Host "======================================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL ULTRA v8.0 - AUTOMATED TEST SUITE RUNNER         " -ForegroundColor Cyan
+Write-Host "   SECURITY SENTINEL ULTRA v8.0 - ENTERPRISE AUTOMATED TEST SUITE     " -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
 
 $ScriptRoot = Split-Path -Parent $PSScriptRoot
@@ -61,14 +62,75 @@ Assert-Test -Name "Phishing parent anomaly scores >= 85 for immediate Freeze" -C
 Assert-Test -Name "Forensic reasons include PhishingParentExploit(+50)" -Condition ($macroForensics.Reasons -contains "PhishingParentExploit(+50)")
 Assert-Test -Name "MITRE ATT&CK includes T1566 Phishing" -Condition ($macroForensics.MitreTechniques -contains "T1566 Phishing")
 
-Write-Host "`n[SUITE 4] Safe-Mode Zero-Trust Name-Spoofing Immunity" -ForegroundColor Yellow
+Write-Host "`n[SUITE 4] Safe-Mode Zero-Trust Parent & Spoofing Defense (Real Inspect-SingleProcess)" -ForegroundColor Yellow
 $fakeNodeForensics = Get-ForensicTriage -ProcessId 0 -FilePath "C:\Users\victim\AppData\Local\Temp\node.exe" -CommandLine "node.exe -e evil()" -IsUnsigned $true -IsParentChildAnomaly $false -IsPhishingParent $false
 Assert-Test -Name "Unsigned Temp binary 'node.exe' scores at least 60 (No silent pass)" -Condition ($fakeNodeForensics.RiskScore -ge 60) -Details "Score: $($fakeNodeForensics.RiskScore)/100"
 Assert-Test -Name "Unsigned Temp binary flags UnsignedBinary(+25) and HighRiskPath(+20)" -Condition ($fakeNodeForensics.Reasons -contains "UnsignedBinary(+25)" -and $fakeNodeForensics.Reasons -contains "HighRiskPath(+20)")
 
-Write-Host "`n[SUITE 5] Stop Token Security & Forgery Protection" -ForegroundColor Yellow
+# Real Inspect-SingleProcess test with Spoofed Parent vs Legitimate Parent
+$childProc = [PSCustomObject]@{
+    ProcessId        = 8881
+    Name             = "worker.exe"
+    ExecutablePath   = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+    CommandLine      = "worker.exe --task"
+    ParentProcessId  = 7771
+}
+$spoofedParentMap = @{
+    7771 = [PSCustomObject]@{
+        ProcessId      = 7771
+        Name           = "steam.exe"
+        ExecutablePath = "C:\Users\victim\AppData\Local\Temp\steam.exe" # SPOOFED PARENT IN TEMP!
+    }
+}
+$spoofedRes = Inspect-SingleProcess -p $childProc -procMap $spoofedParentMap
+Assert-Test -Name "Inspect-SingleProcess REJECTS Safe-Mode pass when parent is spoofed in Temp" -Condition ($spoofedRes.Action -ne "AllowedWorkGamingSafeMode") -Details "Action: $($spoofedRes.Action)"
+
+$childProcLegit = [PSCustomObject]@{
+    ProcessId        = 8882
+    Name             = "worker.exe"
+    ExecutablePath   = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+    CommandLine      = "worker.exe --task"
+    ParentProcessId  = 7771
+}
+$legitParentMap = @{
+    7771 = [PSCustomObject]@{
+        ProcessId      = 7771
+        Name           = "steam.exe"
+        ExecutablePath = "C:\Program Files (x86)\Steam\steam.exe" # GENUINE PARENT IN PROGRAM FILES!
+    }
+}
+$legitRes = Inspect-SingleProcess -p $childProcLegit -procMap $legitParentMap
+Assert-Test -Name "Inspect-SingleProcess ACCEPTS Safe-Mode pass when parent is genuine in Program Files" -Condition ($legitRes.Action -eq "AllowedWorkGamingSafeMode") -Details "Action: $($legitRes.Action)"
+
+Write-Host "`n[SUITE 5] Stop Token Security, Token Forgery & Registry Vault Defense" -ForegroundColor Yellow
 $invalidToken = Test-AuthenticatedStopToken -ExpectedWatchdogPid "99999"
-Assert-Test -Name "Stop token with mismatched PID rejected" -Condition (-not $invalidToken)
+Assert-Test -Name "Stop token with mismatched PID strictly rejected" -Condition (-not $invalidToken)
+
+# Attacker Token Forgery Simulation: Attacker tries to forge stop token without the real HKLM secret
+$attackerPayload = "STOP|$PID|$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+$attackerBytes = [System.Text.Encoding]::UTF8.GetBytes($attackerPayload)
+$fakeAttackerEntropy = [System.Text.Encoding]::UTF8.GetBytes("ATTACKER_FAKE_SECRET_1234567890123")
+$forgedEnc = [System.Security.Cryptography.ProtectedData]::Protect($attackerBytes, $fakeAttackerEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+$stopTokenPath = Join-Path $StateDir "graceful_stop.token"
+[System.IO.File]::WriteAllText($stopTokenPath, [Convert]::ToBase64String($forgedEnc), [System.Text.Encoding]::UTF8)
+
+$forgedTokenAccepted = Test-AuthenticatedStopToken -ExpectedWatchdogPid "$PID"
+Assert-Test -Name "Attacker stop token forged without HKLM secret strictly rejected" -Condition (-not $forgedTokenAccepted)
+
+# Replay Attack Protection: Token with expired timestamp (> 60s)
+$expiredPayload = "STOP|$PID|$([DateTimeOffset]::UtcNow.AddSeconds(-120).ToUnixTimeSeconds())"
+$expiredEnc = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($expiredPayload), $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+[System.IO.File]::WriteAllText($stopTokenPath, [Convert]::ToBase64String($expiredEnc), [System.Text.Encoding]::UTF8)
+$expiredTokenAccepted = Test-AuthenticatedStopToken -ExpectedWatchdogPid "$PID"
+Assert-Test -Name "Replay attack stop token with expired timestamp strictly rejected" -Condition (-not $expiredTokenAccepted)
+
+# Zero-Trust HKCU Secret Purge Verification
+$hkcuSecretExists = $false
+if (Test-Path "HKCU:\Software\SecuritySentinel\IntegrityAnchor") {
+    $val = (Get-ItemProperty -Path "HKCU:\Software\SecuritySentinel\IntegrityAnchor" -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+    if ($val) { $hkcuSecretExists = $true }
+}
+Assert-Test -Name "Zero-Trust: No InstallSecret stored in HKCU (Same-user malware cannot read)" -Condition (-not $hkcuSecretExists)
 
 Write-Host "`n[SUITE 6] Canary Honeypot & SACL XML Attribution" -ForegroundColor Yellow
 $testXml = @"
@@ -95,8 +157,8 @@ if ($failedTests -gt 0) { exit 1 } else { exit 0 }
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD0ZGKihD5ExQKC
-# d46mNGx+4sYcyyNYqrHC0/+E8om0AqCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBtOIANfpMMb7Ly
+# rxjsLs1MiD4uEX3erTa6R9jg+jYU6KCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -117,12 +179,12 @@ if ($failedTests -gt 0) { exit 1 } else { exit 0 }
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEINbHCeOYrNvqE3D1e5tV
-# ec0fjAQ1NT2xbG02F4VDVuqTMA0GCSqGSIb3DQEBAQUABIIBAFB2Cyg6ufU6NGlN
-# ZSLKzuo2BegxgyEkDMq3sNAxaf5uWQHCLwYoKnRtA4DwHL8ih5bKzinW7IYjXxHL
-# igFNRikY8NCWBbsJzN6MYLtuZdsj8j1Fz3YMhgJBtbs5+Dj3VID5U1DqT6rKnhaX
-# l2fZNBKTgRDCwmn/how2pJcilIVa5v5TeIEPPd2r7pUAORqRclFpVW+E/oB7wgfO
-# +oMd+tm3QlRXS5PoKX1//YwUcoF9yDTR2MlDfaVMVLHZbj1/rsFn8JFl2BPz6k3L
-# zsWJIqXjvpb0oR51kP3oaPvB98e9/cJO+zZxJSwmvmXnEUurmTRYyab6yRBZcPLI
-# xwgpQt8=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIJ90F2LT7Yl814FXkykm
+# hwFCgzMGdfOaDxS0RdvTxFx6MA0GCSqGSIb3DQEBAQUABIIBAEZ52VpBaJ5zcFKO
+# VqjoqaUj9v67IYSpzwZEamamkgJwFy+AdAnxKLgzBLGS2jOmpqZOc04x1lW94h/4
+# Ca0iLYWIqODXVOnm+NfuXpYyMaBlUoeoUK5pgdmkCbGg34vGvruBxP5sFjwd1QzN
+# GO8VKsLup/3o/MbCAbVeBbrS2KxpHLb4nTaDuwldnwaeAhEm3pf1/CKxSW92LkF7
+# gpuMKiQam1IdPbc1+DocVQzucc2bqsNVBmw6dkBA6bUIeYMaKz4d4VY08bMcjELR
+# NGYNliyklz9oXlgAQdzc+Ay9SBjsnXsp3ILWssiRr7EcNDPLDDSgw6Nv71/oR0Tu
+# 7YMLYwc=
 # SIG # End signature block

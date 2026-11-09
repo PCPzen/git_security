@@ -1,6 +1,6 @@
 # =====================================================================
 # Security Sentinel Ultra - Universal 1-Click Installer
-# Version 7.0 (Work & Gaming Safe-Mode, OWNER RIGHTS DACL, 256-Bit
+# Version 8.0 (Enterprise EDR, SYSTEM/Admins HKLM ACL, Anti-Spoofing,
 # CSPRNG InstallSecret, Fail-Closed Trust Anchor & Windows 11 Verified)
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -13,29 +13,50 @@ $TargetDir = if ($isAdmin) { "$env:ProgramFiles\SecuritySentinel" } else { $Stat
 $SourceDir = $PSScriptRoot
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "   SECURITY SENTINEL ULTRA - INSTALLER v7.0 (SAFE-MODE)   " -ForegroundColor Yellow
+Write-Host "   SECURITY SENTINEL ULTRA - INSTALLER v8.0 ENTERPRISE EDR   " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 
+function Set-SentinelRegistryAcl {
+    param([string]$KeyPath = "HKLM:\SOFTWARE\SecuritySentinel")
+    try {
+        if (-not (Test-Path $KeyPath)) { New-Item -Path $KeyPath -Force | Out-Null }
+        $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\SecuritySentinel", [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor [System.Security.AccessControl.RegistryRights]::ReadKey)
+        if ($regKey) {
+            $acl = $regKey.GetAccessControl()
+            $acl.SetAccessRuleProtection($true, $false)
+            $sysSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($sysSid, [System.Security.AccessControl.RegistryRights]::FullControl, [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)))
+            $admSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($admSid, [System.Security.AccessControl.RegistryRights]::FullControl, [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)))
+            $usrSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($usrSid, [System.Security.AccessControl.RegistryRights]::ReadKey -bor [System.Security.AccessControl.RegistryRights]::WriteKey, [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny)))
+            $regKey.SetAccessControl($acl)
+            $regKey.Close()
+            return $true
+        }
+    } catch { return $false }
+}
+
 function Get-OrCreateInstallSecret {
-    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
-        if (Test-Path $regPath) {
-            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-            if ($b64) {
-                try { return [Convert]::FromBase64String($b64) } catch {}
-            }
+    # Purge any legacy plaintext secret from HKCU immediately
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+
+    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regPath) {
+        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+        if ($b64) {
+            try { return [Convert]::FromBase64String($b64) } catch {}
         }
     }
     $rngBytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $rng.GetBytes($rngBytes)
     $b64New = [Convert]::ToBase64String($rngBytes)
-    $regHkcu = "HKCU:\Software\SecuritySentinel\IntegrityAnchor"
-    if (-not (Test-Path $regHkcu)) { New-Item -Path $regHkcu -Force | Out-Null }
-    Set-ItemProperty -Path $regHkcu -Name "InstallSecret" -Value $b64New -Force
+
     if ($isAdmin) {
-        $regHklm = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-        if (-not (Test-Path $regHklm)) { New-Item -Path $regHklm -Force | Out-Null }
-        Set-ItemProperty -Path $regHklm -Name "InstallSecret" -Value $b64New -Force
+        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+        Set-ItemProperty -Path $regPath -Name "InstallSecret" -Value $b64New -Force
+        Set-SentinelRegistryAcl | Out-Null
     }
     return $rngBytes
 }
@@ -72,7 +93,7 @@ if ($isAdmin) {
     icacls "$TargetDir\*.ps1" /reset /T /C /Q 2>&1 | Out-Null
 }
 
-$coreScripts = @("SentinelWatchdog.ps1", "SentinelGuardian.ps1", "SentinelDashboard.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")
+$coreScripts = @("SentinelWatchdog.ps1", "SentinelGuardian.ps1", "SentinelDashboard.ps1", "Sign-Scripts.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")
 foreach ($s in $coreScripts) {
     if (Test-Path "$SourceDir\$s") {
         Copy-Item "$SourceDir\$s" "$StateDir\$s" -Force
@@ -100,9 +121,8 @@ $manifestObj = [ordered]@{
 }
 [System.IO.File]::WriteAllText("$StateDir\manifest.json", ($manifestObj | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
 
-$regHkcu = "HKCU:\Software\SecuritySentinel\IntegrityAnchor"
-if (-not (Test-Path $regHkcu)) { New-Item -Path $regHkcu -Force | Out-Null }
-foreach ($k in $hashes.Keys) { Set-ItemProperty -Path $regHkcu -Name $k -Value $hashes[$k] -Force }
+# Zero-Trust: Never write Trust Anchor hashes or secrets to HKCU!
+Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($isAdmin) {
     $regHklm = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
@@ -201,8 +221,8 @@ Write-Host "==========================================================" -Foregro
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCUPmCU3+YqLkJl
-# JoKbm+lFUyatUgkhma7EsbVn79bpk6CCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDArYNMHsa2i+Od
+# pasgnCfN4a1sWSP3ZMMhKNB4Wu3ikKCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
 # k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
 # bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
 # MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
@@ -223,12 +243,12 @@ Write-Host "==========================================================" -Foregro
 # A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
 # h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEINlhj5qClfit4SDubWds
-# qpDyeH+xUuSATSguC/cum8AuMA0GCSqGSIb3DQEBAQUABIIBACwgHKvlXKtIltXc
-# eTonJZa5W0EmZVIOzk0lL2JYJq/ODlrHWQ58ZKzipC8nAdk+xi7iWsDfL2YiwVsl
-# KgDNZJd5l1uKg+iJAJmtrAOXR0E4OunluTqLuQOv0np/0p3xxV7zg95uNkXs44L4
-# OV4t/78e/20fm+SfTGfVd1tou5BFVoNW4fvTijqFbuvJ6lENRlM8SFf4vyfHfVTc
-# wGvtFz7xRENlsCJ6zXc64lXx4GDjWkl65dZjyNRLwNVCxDXHoNlpROGMMc8DzAZa
-# y5+Qe8j1AYVltrkKwusdb0QQ8YGi+OpfwBT2FTXC2qU3Ve7Qdp+DMJ2sofTO6z13
-# XRSEwh8=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIEIPw/qKyi7OxKTYOafs
+# cX0U9kbmh2BhsJapQnAnaBogMA0GCSqGSIb3DQEBAQUABIIBALHm2nrfcy3Lo5g7
+# EmjFuKkPSOLmwbSy7puQgcg+z3gfnqEph4JuwCwX08jpCrTfgud9uKlRZAP9mGE5
+# YVQmKx1J3MhsZjqLDCirH32Yor7+6vAadbhyIzVkI5H27nl2KjMC6Rv/7ulC/cRT
+# dhB5buny5QzjquT08lmNkVibtpCrb0cIh96OaYMRKHhVlgVC6oewZeLCrtJG7Iu0
+# YKZl5vLnpNhTNkXZs0drTPJxSnurUlZITehnMBHvisTBkJ28Hs+adHzLQYn6UDoN
+# I2W6FMsSNhBQLI3UOKOSHVjF2Yh0qzHC+gH8YpriRdvKixUTMjJKiZ8xe7tPtgAo
+# Id3nZbo=
 # SIG # End signature block
