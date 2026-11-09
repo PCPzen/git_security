@@ -1,5 +1,5 @@
-# =====================================================================
-# Security Sentinel Ultra v7.0 - Work & Gaming Safe-Mode Enterprise EDR
+﻿# =====================================================================
+# Security Sentinel Ultra v8.0 - Enterprise EDR (DPAPI, Anti-Bypass, Phishing Guard)
 # Third-Round Red-Team Hardened & Windows 11 Verified Edition:
 # 1. OWNER RIGHTS (S-1-3-4) Kernel DACL: Blocks WRITE_DAC (0x00040000) &
 #    PROCESS_TERMINATE (0x0001) even from same-user processes!
@@ -280,7 +280,7 @@ namespace SentinelNative {
                 long address = 0;
                 long maxAddress = 0x7FFFFFFF0000L;
                 int totalBytesScanned = 0;
-                int maxTotalScan = 16 * 1024 * 1024;
+                int maxTotalScan = 64 * 1024 * 1024;
                 uint mbiSize = (uint)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION));
 
                 while (address < maxAddress && totalBytesScanned < maxTotalScan) {
@@ -635,32 +635,61 @@ function Initialize-CodeIntegrityTrustAnchor {
 function Test-IsVerifiedSentinelScript {
     param([string]$CommandLine)
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
-    $anchor = Get-TrustedScriptHashes
-    if ($anchor.Count -eq 0) { return $false }
 
-    foreach ($scriptName in @("SentinelDashboard.ps1", "SentinelWatchdog.ps1", "SentinelGuardian.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")) {
-        if ($CommandLine -match [regex]::Escape($scriptName) -and $anchor.ContainsKey($scriptName)) {
-            $expectedHash = $anchor[$scriptName]
-            # Extract path from CommandLine or check standard directories
-            $candidates = @(
-                (Join-Path $SentinelDir $scriptName),
-                (Join-Path $StateDir $scriptName)
-            )
-            if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot $scriptName) }
-            if ($CommandLine -match '(?i)"([^"]+' + [regex]::Escape($scriptName) + ')"') {
-                $candidates = @($Matches[1]) + $candidates
-            }
-            foreach ($cand in $candidates) {
-                if ($cand -and (Test-Path $cand -PathType Leaf)) {
-                    $actualHash = (Get-FileHash -Path $cand -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-                    if ($actualHash -and ($actualHash -eq $expectedHash)) {
-                        return $true
-                    }
-                }
-            }
+    # 1. Hard rejection if command line contains obfuscation, base64 payload, or inline commands
+    if ($CommandLine -match "(?i)(-enc|-encodedcommand|-e\b|-c\b|-command|invoke-expression|\biex\b|downloadstring|frombase64string|amsiutils)") {
+        return $false
+    }
+
+    # 2. Must explicitly specify -File "<path>"
+    if ($CommandLine -notmatch "(?i)-file\s+[`"']?([^`"'\s]+(?:\s+[^`"'\s]+)*?\.ps1)[`"']?") {
+        return $false
+    }
+
+    $invokedScriptPath = $Matches[1]
+    $leafName = Split-Path $invokedScriptPath -Leaf
+    $authorizedScripts = @("SentinelDashboard.ps1", "SentinelWatchdog.ps1", "SentinelGuardian.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1", "Sign-Scripts.ps1")
+    if ($authorizedScripts -notcontains $leafName) {
+        return $false
+    }
+
+    # 3. Resolve the actual physical file specified in -File parameter
+    try {
+        if (-not (Test-Path $invokedScriptPath -PathType Leaf)) { return $false }
+        $resolvedItem = Get-Item $invokedScriptPath -ErrorAction Stop
+        $realPath = $resolvedItem.FullName
+    } catch {
+        return $false
+    }
+
+    # 4. Must reside in authorized installation or repo directory
+    $authDirs = @($SentinelDir.TrimEnd('\'), $StateDir.TrimEnd('\'))
+    if ($PSScriptRoot) { $authDirs += $PSScriptRoot.TrimEnd('\') }
+    $parentDir = (Split-Path $realPath -Parent).TrimEnd('\')
+
+    $isAuthorizedDir = $false
+    foreach ($ad in $authDirs) {
+        if ($parentDir -ieq $ad) { $isAuthorizedDir = $true; break }
+    }
+    if (-not $isAuthorizedDir) { return $false }
+
+    # 5. Check hash of THAT EXACT RESOLVED FILE against Trust Anchor
+    $anchor = Get-TrustedScriptHashes
+    if ($anchor.Count -gt 0 -and $anchor.ContainsKey($leafName)) {
+        $actualHash = (Get-FileHash -Path $realPath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+        if ($actualHash -ne $anchor[$leafName]) {
+            return $false
         }
     }
-    return $false
+
+    # 6. Reject if any command chaining operators exist after the script path (e.g. &&, ||, ;, |)
+    $escaped = [regex]::Escape($invokedScriptPath)
+    $parts = $CommandLine -split $escaped, 2
+    if ($parts.Count -gt 1 -and $parts[1] -match "(&|;|\||`n|`r|\-command)") {
+        return $false
+    }
+
+    return $true
 }
 
 $script:TrustAnchorHashes = Get-TrustedScriptHashes
@@ -851,7 +880,8 @@ function Get-ForensicTriage {
         [string]$FilePath = "",
         [string]$CommandLine = "",
         [bool]$IsUnsigned = $true,
-        [bool]$IsParentChildAnomaly = $false
+        [bool]$IsParentChildAnomaly = $false,
+        [bool]$IsPhishingParent = $false
     )
     $expandedCmd = Expand-EncodedCommandLine -RawCommandLine $CommandLine
 
@@ -865,6 +895,7 @@ function Get-ForensicTriage {
         UnbackedPeHeaders = 0
         ActiveSockets     = @()
         MitreTechniques   = @()
+        Reasons           = @()
         DecodedCommand    = $expandedCmd
         Summary           = ""
         ReportFile        = ""
@@ -927,6 +958,12 @@ function Get-ForensicTriage {
     $reasons = @()
     $mitre = New-Object 'System.Collections.Generic.HashSet[string]'
 
+    if ($IsPhishingParent) {
+        $score += 50
+        $reasons += "PhishingParentExploit(+50)"
+        [void]$mitre.Add("T1566 Phishing")
+        [void]$mitre.Add("T1204 User Execution")
+    }
     if ($IsParentChildAnomaly) {
         $score += 25
         $reasons += "ParentChildAnomaly(+25)"
@@ -987,6 +1024,7 @@ function Get-ForensicTriage {
     $triage.RiskScore = $score
     $triage.RiskLevel = if ($score -ge 85) { "CRITICAL" } elseif ($score -ge 60) { "HIGH" } else { "MEDIUM" }
     $triage.MitreTechniques = @($mitre)
+    $triage.Reasons = $reasons
 
     $c2Text = if ($triage.C2Indicators.Count -gt 0) { ($triage.C2Indicators -join " | ") } else { "None found" }
     $netText = if ($triage.ActiveSockets.Count -gt 0) { ($triage.ActiveSockets -join ", ") } else { "No active external sockets" }
@@ -1235,6 +1273,7 @@ function Move-ToQuarantine {
         [string]$Reason = "Threat Artifact Quarantined"
     )
     if (-not (Test-Path $SourcePath)) { return $null }
+    if (-not (Test-Path $QuarDir)) { New-Item -ItemType Directory -Path $QuarDir -Force | Out-Null }
 
     $intel = Get-FileThreatIntel -FilePath $SourcePath
     $fileName = Split-Path $SourcePath -Leaf
@@ -1554,8 +1593,13 @@ function Inspect-SingleProcess {
     $expandedCmd      = Expand-EncodedCommandLine -RawCommandLine $cmd
     $hasObfuscation   = ($expandedCmd -match $script:ObfuscatedCmdRegex)
 
-    $isHighRiskParent = ($parentName -match "^(chrome|msedge|brave|opera|nikke|nikke_launcher|discord|telegram|steam|robloxplayerbeta|robloxstudio|riotclientservices|valorant|tslgame)\.exe$")
-    $isWorkOrGameDev  = ($parentName -match $script:WorkAndGamingParentsRegex) -or ($cName -match $script:WorkAndGamingParentsRegex)
+        $isBrowserOrLauncher = ($parentName -match "^(chrome|msedge|brave|opera|firefox|discord|telegram|steam|robloxplayerbeta|robloxstudio|riotclientservices|valorant|tslgame)\.exe$")
+    $isOfficeParent      = ($parentName -match "^(winword|excel|powerpnt|outlook|msaccess|visio|mspub|eqnedt32)\.exe$")
+    $isPdfParent         = ($parentName -match "^(acrord32|acrobat|foxitreader|pdfxcview)\.exe$")
+    $isArchiveParent     = ($parentName -match "^(winrar|7z|7zfm|peazip|bandizip)\.exe$")
+    $isScriptParent      = ($parentName -match "^(wscript|cscript|mshta|rundll32|regsvr32)\.exe$")
+    $isHighRiskParent    = ($isBrowserOrLauncher -or $isOfficeParent -or $isPdfParent -or $isArchiveParent -or $isScriptParent)
+    $isWorkOrGameDev  = ($parentName -match $script:WorkAndGamingParentsRegex)
     $isShellOrLolbin  = ($cName -match "^(powershell|pwsh|cmd|mshta|wscript|cscript|regsvr32|certutil|bitsadmin)\.exe$")
 
     # =================================================================
@@ -1576,7 +1620,8 @@ function Inspect-SingleProcess {
             Add-BehavioralSignal -ProcessId $cPid -SignalType "ObfuscatedCommand" -MitreTechnique "T1027 Obfuscated/Encoded Command" -Weight 0 -Detail "Encoded/Fileless Shell"
         }
 
-        $forensics = Get-ForensicTriage -ProcessId $cPid -FilePath $exe -CommandLine $cmd -IsUnsigned $isUnsigned -IsParentChildAnomaly ($isHighRiskParent -and $isShellOrLolbin)
+        $isPhishingExploit = ($isOfficeParent -or $isPdfParent -or $isArchiveParent)
+        $forensics = Get-ForensicTriage -ProcessId $cPid -FilePath $exe -CommandLine $cmd -IsUnsigned $isUnsigned -IsParentChildAnomaly ($isHighRiskParent -and $isShellOrLolbin) -IsPhishingParent $isPhishingExploit
 
         if ($hasObfuscation -or ($forensics.RiskScore -ge $minScoreToFreeze)) {
             $alertLevel = if ($hasObfuscation -or $forensics.RiskScore -ge 85) { "CRITICAL" } else { "TIER2" }
@@ -1652,7 +1697,7 @@ function Inspect-SingleProcess {
 
         # Work & Gaming Safe-Mode: If spawned by a Developer IDE/Compiler/Game Launcher and has NO C2/Packed/Reflective indicators, log only!
         if ($script:Config.SafeWorkGamingMode -and $isWorkOrGameDev -and (-not $hasHardMaliciousProof) -and ($forensics.Entropy -lt 7.2)) {
-            Write-Log "Work/Gaming Safe-Mode: Allowed unsigned dev/game helper in Temp '$cName' (Parent: $parentName, PID: $cPid, Score: $($forensics.RiskScore)/100)." "INFO"
+            Write-Log "Work/Gaming Safe-Mode: Monitored unsigned dev/game helper in Temp '$cName' (Parent: $parentName, PID: $cPid, Score: $($forensics.RiskScore)/100)." "WARN"
             return @{ Action = "AllowedWorkGamingSafeMode"; Frozen = $false; RiskScore = $forensics.RiskScore }
         }
 
@@ -1938,7 +1983,7 @@ function Inspect-DeepTelemetryEvents {
                 $evPid = [int]$pev.ProcessId
                 if ($evPid -eq $PID -or $evPid -eq $script:VerifiedGuardianPid) { continue }
                 $msg = "$($pev.Message)"
-                if ($msg -match "(?i)(AmsiUtils|amsiInitFailed|Invoke-Mimikatz|MiniDumpWriteDump|\.ROBLOSECURITY|discord(app)?\.com/api/webhooks/)") {
+                if ($msg -match "(?i)([A]msiUtils|[a]msiInitFailed|[I]nvoke-Mimikatz|[M]iniDumpWriteDump|\.ROBLOSECURITY|discord(app)?\.com/api/webhooks/)") {
                     if ($msg -match "Security Sentinel Ultra|SentinelNative|RED-TEAM & MITRE") { continue }
                     Add-BehavioralSignal -ProcessId $evPid -SignalType "ScriptBlock4104" -MitreTechnique "T1059.001 PowerShell ScriptBlock" -Weight 45 -Detail "Malicious ScriptBlock Primitive"
                     $snippet = if ($msg.Length -gt 240) { $msg.Substring(0, 240) + "..." } else { $msg }
@@ -2078,6 +2123,15 @@ while ($true) {
             Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
             exit 0
         }
+        $thawReq = "$StateDir\thaw_request.pid"
+        if (Test-Path $thawReq) {
+            $tPid = (Get-Content $thawReq -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+            if ($tPid -match '^\d+$' -and ("SentinelNative.KernelControl" -as [type])) {
+                [SentinelNative.KernelControl]::ThawProcess([int]$tPid) | Out-Null
+                Write-Log "Process $tPid thawed via Dashboard request." "INFO"
+            }
+            Remove-Item $thawReq -Force -ErrorAction SilentlyContinue
+        }
     }
     $loopCount++
 
@@ -2133,3 +2187,38 @@ while ($true) {
         $script:Config = Load-SentinelConfig
     }
 }
+
+# SIG # Begin signature block
+# MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDJmwGVJ3UkAQdR
+# gAgdi/3mKklXYuuu4+krQE4QJ5dII6CCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
+# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
+# MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
+# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALllSiqT
+# Y5Sc6hifAl+AGeEpL3joSXd9ne4K7pKYDHPQavPfBy32CzCJa1jyX77QoO1UtsOv
+# On5Xoi8k5ApurF/WYtjU0g3ql946XPjn6VjwGLmbqSA+pNGqnOMjBz4ox0cqVblm
+# 5hD944XKqtREmR7apy3lthUp7XTTG7BGRAVqhZpd+E/VTVG0A+P3wcNc7y3aOxoa
+# DJ6JHO/8putrt37Q54x3UVUXOU8Zbwwjic/NI7WV5ckmQ00jiI2cxZgzXdqnXxDU
+# aWxd7Ek2/z9QDJEE6wRtBHtvynUpAcZvBW87Xx0WwB8h5qh2P1gHF5ZONY1hzuav
+# shNwuowu2k17JakCAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
+# CCsGAQUFBwMDMB0GA1UdDgQWBBThzeAg8TkOvzIAhDScXw7avedctTANBgkqhkiG
+# 9w0BAQsFAAOCAQEAQJM2S9UXri6Zk2rCN6vcsOSuJBRdo43f2i/IXF8KqqPl89cB
+# 0EKkiYCaz/1zpjyqotuM0PfHdQgyhOS1rBy8BGCc9CmD2Yk4mcGe1cq/DPrjjmHZ
+# I/Hbwq5jla1t5hIB8TENaRlO2yJcnx0m7zJ90RHkCm5t4sVQO55kh//OfQ4RUXEA
+# vNdnlgF1EkHey5FbUxyhcEsCZpsJU+KrGceLE43oYtCEekpdTsNuC3SNCYP674yo
+# lebxXnckHIuqfnYmizmxBMhYcK3RChIIv8cFPR2/n0EhcQ3XeNNfksfrVyarz8eE
+# BFVfGerioUtLIH4OFiCsGTtRr0BCbo6iE7kwajGCAfUwggHxAgEBMEMwLzEtMCsG
+# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
+# h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
+# oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIBhPle4zjY6ZajwJzufj
+# nDDokeYYDEPb2AmKAnKTUpnlMA0GCSqGSIb3DQEBAQUABIIBAJ1KjBpsHjUm3B6p
+# Bg09JTdZS9ukbRmTt25cTkUjYupQM5IBTZLyYHTD69xkIJ19i7b7NjWHZ9+ImMMF
+# BcWtmx8/j/5k50rTTtxj7xgYr1SDgUcl7T5sLmZ4cAab3HVQydbtUZLRazJkg4+q
+# tOupRjanyAwfELVtyFvmjWrL2uDX5KabSrNou0w7b8WmmOaGxOXOZuBfHkcgkx5P
+# 88IiDUb93CerG5MHmgZRrzkKkLsVC4uHqM67PFn1iH4A3H5AFOJArLkkaFSrHiQ2
+# yNx7rufTjdbx6+rr3rADBxt9N4V0W470VKWetZuVlaHtGN+OIYHamgNh+dYtI5tq
+# 1xC1DHI=
+# SIG # End signature block

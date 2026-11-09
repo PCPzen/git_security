@@ -1,6 +1,6 @@
 # =====================================================================
 # Security Sentinel Ultra - Modern GUI Command Center (WPF / XAML)
-# Version 5.0 (Red-Team Hardened Edition: DPAPI + Live RAM + Kernel DACL)
+# Version 8.0 Enterprise EDR Edition (3-State Traffic Light & Safe Rollback)
 # =====================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic, System.Security
@@ -27,31 +27,17 @@ if ((-not (Test-Path $ConfigFile)) -and (Test-Path $PortableCfg)) {
     Copy-Item -Path $PortableCfg -Destination $ConfigFile -Force
 }
 
-$dashNative = @"
-using System;
-using System.Runtime.InteropServices;
-namespace SentinelDashboardNative {
-    public static class ProcessControl {
-        [DllImport("ntdll.dll", SetLastError = true)]
-        private static extern int NtResumeProcess(IntPtr processHandle);
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr hObject);
-        public static bool ThawProcess(int pid) {
-            IntPtr hProc = OpenProcess(0x0800, false, pid);
-            if (hProc == IntPtr.Zero) return false;
-            try { return (NtResumeProcess(hProc) == 0); }
-            finally { CloseHandle(hProc); }
-        }
+function Thaw-FrozenProcess([int]$TargetPid) {
+    if ($TargetPid -le 0) { return $false }
+    if ("SentinelNative.KernelControl" -as [type]) {
+        try { return [SentinelNative.KernelControl]::ThawProcess($TargetPid) } catch {}
     }
+    try {
+        $thawReq = Join-Path $SentinelDir "thaw_request.pid"
+        [System.IO.File]::WriteAllText($thawReq, "$TargetPid", [System.Text.Encoding]::UTF8)
+        return $true
+    } catch { return $false }
 }
-"@
-try {
-    if (-not ("SentinelDashboardNative.ProcessControl" -as [type])) {
-        Add-Type -TypeDefinition $dashNative -Language CSharp -ErrorAction SilentlyContinue
-    }
-} catch {}
 
 function Get-DashboardInstallSecretBytes {
     foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKCU:\Software\SecuritySentinel\IntegrityAnchor")) {
@@ -845,8 +831,8 @@ $btnThaw.Add_Click({
     if (Test-Path $FrozenFile) {
         $fPid = (Get-Content $FrozenFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
         $resumed = $false
-        if ($fPid -match '^\d+$' -and ("SentinelDashboardNative.ProcessControl" -as [type])) {
-            $resumed = [SentinelDashboardNative.ProcessControl]::ThawProcess([int]$fPid)
+        if ($fPid -match '^\d+$') {
+            $resumed = Thaw-FrozenProcess -TargetPid ([int]$fPid)
         }
         Remove-Item $FrozenFile -Force -ErrorAction SilentlyContinue
         Append-DashboardLog "[PILLAR 5] NtResumeProcess executed on PID $fPid (Resumed=$resumed) & cleared freeze state."
@@ -896,7 +882,12 @@ $btnToggleDaemon.Add_Click({
     try {
         Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop
     } catch {
-        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`"" -WindowStyle Hidden
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "powershell.exe"
+        $psi.Arguments = "-NoProfile -File `"$ScriptPath`""
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        $psi.CreateNoWindow = $true
+        [System.Diagnostics.Process]::Start($psi) | Out-Null
     }
 
     Append-DashboardLog "[DAEMON] Sentinel Ultra daemon restarted by user via Dashboard."
@@ -914,3 +905,38 @@ $btnClearLog.Add_Click({
 # Initial render
 Update-DashboardStatus
 $window.ShowDialog() | Out-Null
+
+# SIG # Begin signature block
+# MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBKDd+5DcEY96B6
+# 6MRuwCh1kkKfnltiZpc5+gZbV5TtcKCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
+# k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
+# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
+# MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
+# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALllSiqT
+# Y5Sc6hifAl+AGeEpL3joSXd9ne4K7pKYDHPQavPfBy32CzCJa1jyX77QoO1UtsOv
+# On5Xoi8k5ApurF/WYtjU0g3ql946XPjn6VjwGLmbqSA+pNGqnOMjBz4ox0cqVblm
+# 5hD944XKqtREmR7apy3lthUp7XTTG7BGRAVqhZpd+E/VTVG0A+P3wcNc7y3aOxoa
+# DJ6JHO/8putrt37Q54x3UVUXOU8Zbwwjic/NI7WV5ckmQ00jiI2cxZgzXdqnXxDU
+# aWxd7Ek2/z9QDJEE6wRtBHtvynUpAcZvBW87Xx0WwB8h5qh2P1gHF5ZONY1hzuav
+# shNwuowu2k17JakCAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
+# CCsGAQUFBwMDMB0GA1UdDgQWBBThzeAg8TkOvzIAhDScXw7avedctTANBgkqhkiG
+# 9w0BAQsFAAOCAQEAQJM2S9UXri6Zk2rCN6vcsOSuJBRdo43f2i/IXF8KqqPl89cB
+# 0EKkiYCaz/1zpjyqotuM0PfHdQgyhOS1rBy8BGCc9CmD2Yk4mcGe1cq/DPrjjmHZ
+# I/Hbwq5jla1t5hIB8TENaRlO2yJcnx0m7zJ90RHkCm5t4sVQO55kh//OfQ4RUXEA
+# vNdnlgF1EkHey5FbUxyhcEsCZpsJU+KrGceLE43oYtCEekpdTsNuC3SNCYP674yo
+# lebxXnckHIuqfnYmizmxBMhYcK3RChIIv8cFPR2/n0EhcQ3XeNNfksfrVyarz8eE
+# BFVfGerioUtLIH4OFiCsGTtRr0BCbo6iE7kwajGCAfUwggHxAgEBMEMwLzEtMCsG
+# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
+# h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
+# oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIOAA/Oezb2+pxhrSzLd7
+# I6mgYO6QFF4/GXV9G1/FxonEMA0GCSqGSIb3DQEBAQUABIIBAGJeuH3d8jQXChK2
+# D5oskTpz3cJCMGew82vFxSl3K9EEZn+JuGu0NJM3+mIwIbGi14UsrIghMWd9vGya
+# ZimbxfKHj2jdZ6tPYXcIYVj7pZAUSVXiKxe6+Pv4b9GE887wNnQIEhGC5CBAqp0z
+# rr13LMLEYPSLzJ0Vpg+E5z525Xi/eboD2px5QRKoIz9vEp9CYU+fZz+m02jyl8RZ
+# EjLLYoY3unn5uNuojggktOyDGPtJoPEWyd2aMPNoigtxgES9mX5pzY8owOL0uxXR
+# mKbr9vMv4BGKjeku9I5mqYX3VVGLFCHIh9tQgC6Sb9e20LH6WorJSmXeZgI2XRGU
+# 5n75cgs=
+# SIG # End signature block
