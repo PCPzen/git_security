@@ -607,7 +607,8 @@ function Update-DashboardStatus {
         $txtStatus.Foreground = [Windows.Media.Brushes]::MediumSpringGreen
         $badgeStatus.Background = [Windows.Media.Brushes]::DarkGreen
         $dotStatus.Fill = [Windows.Media.Brushes]::MediumSpringGreen
-        $btnToggleDaemon.Content = "[RESTART] Restart Shield"
+        $btnToggleDaemon.Content = "[STOP] Stop Shield"
+        $btnToggleDaemon.Background = (New-Object Windows.Media.BrushConverter).ConvertFromString("#991B1B")
     } else {
         $txtDaemonStatus.Text = "STOPPED"
         $txtDaemonStatus.Foreground = [Windows.Media.Brushes]::IndianRed
@@ -621,6 +622,7 @@ function Update-DashboardStatus {
         $badgeStatus.Background = [Windows.Media.Brushes]::DarkRed
         $dotStatus.Fill = [Windows.Media.Brushes]::IndianRed
         $btnToggleDaemon.Content = "[START] Start Shield"
+        $btnToggleDaemon.Background = [Windows.Media.Brushes]::DarkGreen
     }
 
     # 3. Tier 3 Network Killswitch State
@@ -869,29 +871,47 @@ $btnQuarantine.Add_Click({
     Start-Process "explorer.exe" $QuarDir
 })
 
-# Button: Restart/Start Daemon
+# Button: Toggle Shield (Start / Stop)
 $btnToggleDaemon.Add_Click({
-    New-AuthenticatedStopToken
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    $runningProc = $null
+    if (Test-Path $PidFile) {
+        $rPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+        if ($rPid -match '^\d+$') {
+            $runningProc = Get-Process -Id [int]$rPid -ErrorAction SilentlyContinue
+        }
     }
-    if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 1600
-    if (Test-Path $StopTokenFile) { Remove-Item $StopTokenFile -Force -ErrorAction SilentlyContinue }
-
-    try {
-        Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop
-    } catch {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "powershell.exe"
-        $psi.Arguments = "-NoProfile -File `"$ScriptPath`""
-        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-        $psi.CreateNoWindow = $true
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
+    if (-not $runningProc) {
+        $runningProc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1" } | Select-Object -First 1
     }
 
-    Append-DashboardLog "[DAEMON] Sentinel Ultra daemon restarted by user via Dashboard."
-    Start-Sleep -Seconds 1
+    if ($runningProc) {
+        # Currently RUNNING -> User clicks to STOP the shield
+        New-AuthenticatedStopToken
+        Stop-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName "SecuritySentinelGuardian" -ErrorAction SilentlyContinue
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" } | ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 1200
+        if (Test-Path $StopTokenFile) { Remove-Item $StopTokenFile -Force -ErrorAction SilentlyContinue }
+        Append-DashboardLog "[DAEMON] Sentinel Ultra shield stopped/paused by user via Dashboard."
+    } else {
+        # Currently STOPPED -> User clicks to START the shield
+        try {
+            Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop
+        } catch {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = "-NoProfile -File `"$ScriptPath`""
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            $psi.CreateNoWindow = $true
+            [System.Diagnostics.Process]::Start($psi) | Out-Null
+        }
+        Append-DashboardLog "[DAEMON] Sentinel Ultra shield started by user via Dashboard."
+    }
+
+    Start-Sleep -Milliseconds 800
     Update-DashboardStatus
 })
 
@@ -909,34 +929,34 @@ $window.ShowDialog() | Out-Null
 # SIG # Begin signature block
 # MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAt6fS3uFDTqjKj
-# fIKj34OlIUox3gSX6qMFbRCeCupadKCCAzIwggMuMIICFqADAgECAhARiv7ch4Yq
-# k00USv2WB3cfMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
-# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkwMjUxMjZaFw0zMTEx
-# MDkwMzAxMjVaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
-# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALllSiqT
-# Y5Sc6hifAl+AGeEpL3joSXd9ne4K7pKYDHPQavPfBy32CzCJa1jyX77QoO1UtsOv
-# On5Xoi8k5ApurF/WYtjU0g3ql946XPjn6VjwGLmbqSA+pNGqnOMjBz4ox0cqVblm
-# 5hD944XKqtREmR7apy3lthUp7XTTG7BGRAVqhZpd+E/VTVG0A+P3wcNc7y3aOxoa
-# DJ6JHO/8putrt37Q54x3UVUXOU8Zbwwjic/NI7WV5ckmQ00jiI2cxZgzXdqnXxDU
-# aWxd7Ek2/z9QDJEE6wRtBHtvynUpAcZvBW87Xx0WwB8h5qh2P1gHF5ZONY1hzuav
-# shNwuowu2k17JakCAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMDMB0GA1UdDgQWBBThzeAg8TkOvzIAhDScXw7avedctTANBgkqhkiG
-# 9w0BAQsFAAOCAQEAQJM2S9UXri6Zk2rCN6vcsOSuJBRdo43f2i/IXF8KqqPl89cB
-# 0EKkiYCaz/1zpjyqotuM0PfHdQgyhOS1rBy8BGCc9CmD2Yk4mcGe1cq/DPrjjmHZ
-# I/Hbwq5jla1t5hIB8TENaRlO2yJcnx0m7zJ90RHkCm5t4sVQO55kh//OfQ4RUXEA
-# vNdnlgF1EkHey5FbUxyhcEsCZpsJU+KrGceLE43oYtCEekpdTsNuC3SNCYP674yo
-# lebxXnckHIuqfnYmizmxBMhYcK3RChIIv8cFPR2/n0EhcQ3XeNNfksfrVyarz8eE
-# BFVfGerioUtLIH4OFiCsGTtRr0BCbo6iE7kwajGCAfUwggHxAgEBMEMwLzEtMCsG
-# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhARiv7c
-# h4Yqk00USv2WB3cfMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDrQfheG9DC+BNb
+# WJ5spxCL6TtqpW1BGjObEYT3D5uLVKCCAzIwggMuMIICFqADAgECAhBqicxAtgYy
+# tEDV87OXYXwsMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
+# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkxODA2NDBaFw0zMTEx
+# MDkxODE2NDBaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
+# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMNKKvtK
+# ERrpKZl/ygPwjprcar+6Xk/3xKwms9K7GDTSH8EYVjwFvMsNGB8+On0f31+3hmyt
+# KZzePEl5panG4eomaJwGl5qLzD2qyJVAtpgRKh+fiUgjFgm+FOm46u74WMC/Jhr2
+# UZe+h6PpO7eoAizbrVRHPaHIOSfIMxnQFVtkkV66T0O5ELGaqTsLZbeQRZsvf6pl
+# mIRLQ7nDIzQ6HqRuaWYfU/GNB8/uDhymxuRyLVV6y6pJ/lO2plVgHwC1JHIT7M+S
+# t6Fx8wOkUB9McT6P/T4uXHP56PufSxPC7Q4IgDBQ4sQr6NKqtxzVeZ8LBeZW9dsF
+# /E1ggkQ3GpNEDmECAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
+# CCsGAQUFBwMDMB0GA1UdDgQWBBTzQylDY2rNT15+NYtrGro9m44IMjANBgkqhkiG
+# 9w0BAQsFAAOCAQEASGAB2FcY0MsNMQsmt1MEmkmsNWWM15Bf3/gojZQeA84NS39J
+# Q3AvtZsrUFq7czi6dm0Oh5GtmEhBBaXxdQeZc48SviS1ZkH+ydm4wFNDz0htXqem
+# K5iqgz9JWlYbO0Q1SpCwnrL2lqtXUTqnq1K83NVlyEfMJy1N/pve+DlOLEBjvPvr
+# PJDNfUZ79skHaztddUvFUfRFIOaMr0sop2XozdqDsD3Au4im941zJTleYk7m+0Qx
+# V0WFPnXMN88dI7JkFgmgmoT53b362u5EU9KHRnwLNjrGIb4+NpAH5QtH7Xl1hqde
+# Hxvq+WiRbpJEMEiPyUN71mzSsOfIzKk16U4MIjGCAfUwggHxAgEBMEMwLzEtMCsG
+# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhBqicxA
+# tgYytEDV87OXYXwsMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
 # oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEICOKXMbwiYVlY7RTzYOs
-# rgV/PkqtbKGIY3W8fTR6kgnKMA0GCSqGSIb3DQEBAQUABIIBAKwc+mLF3nnmVgsS
-# r1i3zWEhPh6OdY6ffMgI3P1hcJpI/bIJyGRF+u/BcyQVJvUqYsDkfnsAJ/XkMUep
-# 3bMzcRq0JI/h3orSj4eHza5JSp4FsF2fFSOCMGNZ9PpXO4cZcaTgV5j6yb6Zxv18
-# IE1KZiZ7jNbTFjEZr7H9Kk7ZVw0ZXxIcBdoiWeImbHvnXow9hhnfnpn4FIZQ/uC9
-# PaCLKmQj0awBLSJ5XB9Fk3xaov3llTAha+5bAelHXgbVe7i+O3GZscfP04fSxoTg
-# 5JkleXHMlakyMZNVOGcfUdtftVLWmi4q388fN/o1LINggNo7Xhl8cYs65l3IRoW5
-# 2TjLAJ4=
+# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIPQW+PvMn18PkTIwOEmo
+# Ua4iwCkJ3AEQxtQjT1Rk/DwJMA0GCSqGSIb3DQEBAQUABIIBAIuDkWIs+nZjxt7z
+# 9erggIt1B4Fk9wdVtAH8GqJFxoc/6YE4D7KBeLGCi6xbBCyal8vxOzsoA898b0G1
+# JOlF0gulsmf8ged+IYQONiei4bnSCP2OVkZFuRZmwEIWklik/ifaltgXjfTzTdY1
+# u1B4ljXvnMEXI41zJbNnonqLzmbL4mcHra22kv9urZxtT0uG+rIZJJIz5GR+36Vo
+# NWMfE7g5la3v5eczEKWAWbWcm5RtACEqxI8W5/lg872hCBRZIIdILg2Vix7mEMiL
+# pbaupLXba9eiW03ZGdUhL1PbZgjoGVd9tdY5+bpomHnJ7bftaCgMSUykCG4WjMUb
+# c/cx6uQ=
 # SIG # End signature block
