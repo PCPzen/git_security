@@ -114,6 +114,7 @@ function Get-OrCreateInstallSecret {
         Set-AndVerifySentinelRegistryAcl -KeyPath $rootKey
         Set-AndVerifySentinelRegistryAcl -KeyPath $secKey
 
+        $script:RotatedLeakedSecret = $false
         if (-not $hadLeakedVault) {
             $b64 = (Get-ItemProperty -Path $secKey -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
             if ($b64) {
@@ -123,6 +124,7 @@ function Get-OrCreateInstallSecret {
                 } catch {}
             }
         } else {
+            $script:RotatedLeakedSecret = $true
             Write-Host "  -> [SECURITY] Legacy vault.sec detected in Admin mode; purged and rotating HKLM InstallSecret." -ForegroundColor Yellow
         }
 
@@ -153,14 +155,31 @@ function Get-OrCreateInstallSecret {
     }
 }
 
-try {
-    $Entropy = Get-OrCreateInstallSecret
-} catch {
-    Write-Host "[FATAL] Failed to initialize or lock Integrity Anchor secret: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+function Get-ExistingStopSecrets($dir) {
+    $secrets = @()
+    $secKey = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $secKey) {
+        try {
+            $b64 = (Get-ItemProperty -Path $secKey -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
+                $bytes = [Convert]::FromBase64String($b64)
+                if ($bytes -and $bytes.Length -ge 16) { $secrets += ,$bytes }
+            }
+        } catch {}
+    }
+    $vf = Join-Path $dir "vault.sec"
+    if (Test-Path $vf) {
+        try {
+            $encB64 = (Get-Content $vf -Raw -Encoding UTF8 -ErrorAction Stop).Trim()
+            $dec = [System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($encB64), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            if ($dec -and $dec.Length -ge 16) { $secrets += ,$dec }
+        } catch {}
+    }
+    return $secrets
 }
 
-function Signal-GracefulStop($dir) {
+function Signal-GracefulStop($dir, [byte[]]$secretBytes) {
+    if (-not $secretBytes -or $secretBytes.Length -lt 16) { return }
     try {
         $pidF = "$dir\sentinel.pid"
         if (-not (Test-Path $pidF)) { return }
@@ -168,7 +187,7 @@ function Signal-GracefulStop($dir) {
         if ($wdPid -notmatch '^\d+$') { return }
         $payload = "STOP|$wdPid|$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-        $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $Entropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $secretBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
         [System.IO.File]::WriteAllText("$dir\graceful_stop.token", [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
         try {
             $ev = [System.Threading.EventWaitHandle]::OpenExisting("Local\SecuritySentinelStopSignal")
@@ -178,16 +197,41 @@ function Signal-GracefulStop($dir) {
     } catch {}
 }
 
+# 0. Stop any existing Watchdog/Guardian BEFORE rotating/purging secrets so old in-memory processes accept the stop token!
+$script:RotatedLeakedSecret = $false
+$oldSecrets = @(Get-ExistingStopSecrets $StateDir)
+foreach ($oldSec in $oldSecrets) {
+    $pidFileCheck = Join-Path $StateDir "sentinel.pid"
+    if (-not (Test-Path $pidFileCheck)) { break }
+    Signal-GracefulStop $StateDir $oldSec
+    $waitMs = 0
+    while ((Test-Path $pidFileCheck) -and ($waitMs -lt 2500)) {
+        Start-Sleep -Milliseconds 250
+        $waitMs += 250
+    }
+}
+Remove-Item "$StateDir\graceful_stop.token" -Force -ErrorAction SilentlyContinue
+Remove-Item "$StateDir\paused_until.txt" -Force -ErrorAction SilentlyContinue
+
+try {
+    $Entropy = Get-OrCreateInstallSecret
+} catch {
+    Write-Host "[FATAL] Failed to initialize or lock Integrity Anchor secret: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+if ($script:RotatedLeakedSecret) {
+    $stillRunning = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" }
+    if ($stillRunning) {
+        Write-Host "  -> [WARN] Legacy Watchdog/Guardian process is still running after secret rotation. Please reboot or log off to clear old in-memory state." -ForegroundColor Yellow
+    }
+}
+
 # 1. Deploy Files (B1: All 10 Core Scripts + No User-Writable Duplicate Scripts in StateDir when Admin!)
 Write-Host "`n[1/4] Deploying v8.0 Enterprise EDR engine files to: $TargetDir" -ForegroundColor White
 @($StateDir, "$StateDir\logs", "$StateDir\quarantine", $TargetDir) | ForEach-Object {
     if (-not (Test-Path $_)) { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
 }
-
-Signal-GracefulStop $StateDir
-Start-Sleep -Milliseconds 1200
-Remove-Item "$StateDir\graceful_stop.token" -Force -ErrorAction SilentlyContinue
-Remove-Item "$StateDir\paused_until.txt" -Force -ErrorAction SilentlyContinue
 
 if ($isAdmin -and ($TargetDir -ne $StateDir)) {
     try { icacls "$StateDir\*.ps1" /reset /T /C /Q 2>&1 | Out-Null } catch {}
