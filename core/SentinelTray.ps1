@@ -7,13 +7,33 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Security
 
-$ProgDir       = "$env:ProgramFiles\SecuritySentinel"
-$StateDir      = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
-    $env:SENTINEL_STATE_DIR
-} else {
-    "$env:LOCALAPPDATA\SecuritySentinel"
+function Resolve-SentinelStateDir {
+    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
+        try {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+            $candidate = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
+            if ($candidate.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $candidate
+            }
+        } catch {}
+    }
+    return $defaultDir
 }
-$SentinelDir   = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
+
+$RegInstallDir = $null
+foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+    if (Test-Path $rp) {
+        $d = (Get-ItemProperty -Path $rp -Name "InstallDir" -ErrorAction SilentlyContinue).InstallDir
+        if ($d -and (Test-Path (Join-Path $d "SentinelWatchdog.ps1"))) { $RegInstallDir = $d; break }
+    }
+}
+
+$ProgDir       = "$env:ProgramFiles\SecuritySentinel"
+$StateDir      = Resolve-SentinelStateDir
+$SentinelDir   = if ($RegInstallDir) {
+    $RegInstallDir
+} elseif (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
     $ProgDir
 } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
     $PSScriptRoot
@@ -49,13 +69,14 @@ function Get-SentinelSecret {
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
-        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
+        try {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
                 $bytes = [Convert]::FromBase64String($b64)
                 if ($bytes -and $bytes.Length -ge 16) { return $bytes }
-            } catch {}
-        }
+            }
+        } catch {}
+        return $null
     }
     $vaultFile = Join-Path $StateDir "vault.sec"
     if (Test-Path $vaultFile) {
@@ -75,10 +96,13 @@ function Test-TrustedScriptIntegrity([string]$FilePath) {
     $actual = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
     if (-not $actual) { return $false }
 
-    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-    if (Test-Path $regAnchor) {
-        $expected = (Get-ItemProperty -Path $regAnchor -Name $leaf -ErrorAction SilentlyContinue).$leaf
-        if ($expected) { return ($actual.ToUpper() -eq "$expected".Trim().ToUpper()) }
+    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regPath) {
+            try {
+                $expected = (Get-ItemProperty -Path $regPath -Name $leaf -ErrorAction SilentlyContinue).$leaf
+                if ($expected) { return ($actual.ToUpper() -eq "$expected".Trim().ToUpper()) }
+            } catch {}
+        }
     }
     if (Test-Path $ManifestFile) {
         try {

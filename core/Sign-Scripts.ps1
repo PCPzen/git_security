@@ -7,7 +7,7 @@
 param(
     [string]$TargetDir = "$PSScriptRoot",
     [string]$CertSubject = "CN=Security Sentinel Ultra Code Signing",
-    [switch]$PurgePrivateKey = $false
+    [switch]$KeepPrivateKey = $false
 )
 
 Write-Host "======================================================================" -ForegroundColor Cyan
@@ -28,6 +28,7 @@ if (-not $cert) {
                                           -CertStoreLocation "Cert:\CurrentUser\My" `
                                           -KeyUsage DigitalSignature `
                                           -KeyLength 2048 `
+                                          -KeyExportPolicy NonExportable `
                                           -HashAlgorithm "SHA256" `
                                           -Type CodeSigningCert `
                                           -NotAfter (Get-Date).AddYears(5) `
@@ -82,9 +83,10 @@ try {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($isAdmin) {
-    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-    if (Test-Path $regAnchor) {
-        Set-ItemProperty -Path $regAnchor -Name "TrustedCertThumbprint" -Value $thumbprint -Force -ErrorAction SilentlyContinue
+    foreach ($subKey in @("HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor", "HKLM:\SOFTWARE\SecuritySentinel\PublicHashes")) {
+        if (Test-Path $subKey) {
+            Set-ItemProperty -Path $subKey -Name "TrustedCertThumbprint" -Value $thumbprint -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -112,8 +114,8 @@ foreach ($f in $filesToSign) {
     }
 }
 
-# 6. Optional CNG/CAPI Private Key Container Destruction + Store Removal
-if ($PurgePrivateKey) {
+# 6. CNG/CAPI Private Key Container Destruction + Store Removal (Default ON unless -KeepPrivateKey)
+if (-not $KeepPrivateKey) {
     try {
         try {
             $rsaKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
@@ -127,10 +129,12 @@ if ($PurgePrivateKey) {
         $myStore.Open("ReadWrite")
         $myStore.Remove($cert)
         $myStore.Close()
-        Write-Host "[KEY PURGE] Certificate removed from CurrentUser\My store." -ForegroundColor Green
+        Write-Host "[KEY PURGE] Certificate removed from CurrentUser\My store (non-exportable key destroyed)." -ForegroundColor Green
     } catch {
         Write-Host "[WARN] Key purge notice: $($_.Exception.Message)" -ForegroundColor DarkGray
     }
+} else {
+    Write-Host "`n[DEV MODE] -KeepPrivateKey specified: Certificate retained in CurrentUser\My (NonExportable)." -ForegroundColor Yellow
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Cyan

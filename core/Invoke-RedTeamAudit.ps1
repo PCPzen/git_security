@@ -13,6 +13,7 @@ Write-Host "====================================================================
 # Use an isolated temporary state directory during E2E audit so production state is untouched
 $AuditStateDir = Join-Path $env:TEMP "SecuritySentinel_Audit_$PID"
 New-Item -ItemType Directory -Path $AuditStateDir -Force | Out-Null
+$env:SENTINEL_TEST_MODE = "1"
 $env:SENTINEL_STATE_DIR = $AuditStateDir
 
 try {
@@ -340,6 +341,7 @@ Start-Sleep -Seconds 4
     Write-Host "        At: $($_.InvocationInfo.PositionMessage)" -ForegroundColor Yellow
     exit 1
 } finally {
+    $env:SENTINEL_TEST_MODE = $null
     $env:SENTINEL_STATE_DIR = $null
     Remove-Item -Path $AuditStateDir -Recurse -Force -ErrorAction SilentlyContinue
 }

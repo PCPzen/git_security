@@ -5,12 +5,35 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic, System.Security
 
+function Resolve-SentinelStateDir {
+    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
+        try {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+            $candidate = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
+            if ($candidate.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $candidate
+            }
+        } catch {}
+    }
+    return $defaultDir
+}
+
+$RegInstallDir = $null
+foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+    if (Test-Path $rp) {
+        $d = (Get-ItemProperty -Path $rp -Name "InstallDir" -ErrorAction SilentlyContinue).InstallDir
+        if ($d -and (Test-Path (Join-Path $d "SentinelWatchdog.ps1"))) { $RegInstallDir = $d; break }
+    }
+}
+
 $ProgDir       = "$env:ProgramFiles\SecuritySentinel"
-$SentinelDir   = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) { $env:SENTINEL_STATE_DIR } else { Join-Path $env:LOCALAPPDATA "SecuritySentinel" }
-$CodeDir       = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) { $ProgDir } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) { $PSScriptRoot } else { $SentinelDir }
+$SentinelDir   = Resolve-SentinelStateDir
+$CodeDir       = if ($RegInstallDir) { $RegInstallDir } elseif (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) { $ProgDir } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) { $PSScriptRoot } else { $SentinelDir }
 $ConfigFile    = Join-Path $SentinelDir "config.json"
 $PortableCfg   = Join-Path $PSScriptRoot "config.json"
 $LogFile       = Join-Path $SentinelDir "logs\sentinel.log"
+$LogTipFile    = Join-Path $SentinelDir "logs\sentinel.tip"
 $QuarDir       = Join-Path $SentinelDir "quarantine"
 $PidFile       = Join-Path $SentinelDir "sentinel.pid"
 $DashPidFile   = Join-Path $SentinelDir "dashboard.pid"
@@ -47,13 +70,14 @@ function Get-DashboardInstallSecretBytes {
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
-        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
+        try {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
                 $bytes = [Convert]::FromBase64String($b64)
                 if ($bytes -and $bytes.Length -ge 16) { return $bytes }
-            } catch {}
-        }
+            }
+        } catch {}
+        return $null
     }
     $vaultFile = Join-Path $SentinelDir "vault.sec"
     if (Test-Path $vaultFile) {
@@ -514,6 +538,10 @@ $script:lastWallTime  = [DateTime]::UtcNow
 function Append-DashboardLog([string]$Msg) {
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     $coreLine = "[$ts] [INFO] $Msg"
+    if (-not ($script:SentinelEntropyBytes -and $script:SentinelEntropyBytes.Length -ge 16)) {
+        Add-Content -Path $LogFile -Value "$coreLine [HMAC:UNAVAILABLE]" -Encoding UTF8 -ErrorAction SilentlyContinue
+        return
+    }
     $prevHmac = "0000000000000000"
     if (Test-Path $LogFile) {
         $lastLn = Get-Content -Path $LogFile -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
@@ -521,16 +549,12 @@ function Append-DashboardLog([string]$Msg) {
             $prevHmac = $Matches[1].ToUpper()
         }
     }
-    $keyBytes = if ($script:SentinelEntropyBytes -and $script:SentinelEntropyBytes.Length -ge 16) {
-        $script:SentinelEntropyBytes
-    } else {
-        [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_LOG_HMAC_DEFAULT_KEY_V8")
-    }
-    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$keyBytes)
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$script:SentinelEntropyBytes)
     $hashBytes = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$prevHmac|$coreLine"))
     $hmac.Dispose()
     $newHmac = ([BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16))
     Add-Content -Path $LogFile -Value "$coreLine [HMAC:$newHmac]" -Encoding UTF8 -ErrorAction SilentlyContinue
+    try { [System.IO.File]::WriteAllText($LogTipFile, $newHmac, [System.Text.Encoding]::UTF8) } catch {}
 }
 
 function Get-DaemonProcess {
@@ -893,6 +917,34 @@ $btnQuarantine.Add_Click({
     Start-Process "explorer.exe" $QuarDir
 })
 
+function Watch-DaemonActionAsync {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$SuccessLog,
+        [string]$FailLogPrefix
+    )
+    if (-not $Process) { Update-DashboardStatus; return }
+    $btnToggleDaemon.IsEnabled = $false
+    $t = New-Object System.Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromMilliseconds(250)
+    $t.Tag = @{ Proc = $Process; Ok = $SuccessLog; Fail = $FailLogPrefix; Timer = $t }
+    $t.Add_Tick({
+        param($sender, $e)
+        $state = $sender.Tag
+        if ($state.Proc.HasExited) {
+            $sender.Stop()
+            $btnToggleDaemon.IsEnabled = $true
+            if ($state.Proc.ExitCode -eq 0) {
+                Append-DashboardLog $state.Ok
+            } else {
+                Append-DashboardLog "$($state.Fail) (ExitCode: $($state.Proc.ExitCode))."
+            }
+            Update-DashboardStatus
+        }
+    })
+    $t.Start()
+}
+
 # Button: Toggle Shield (Start / Stop with Confirmation, UAC Elevation & Trust Anchor Verification)
 $btnToggleDaemon.Add_Click({
     $runningProc = $null
@@ -917,31 +969,22 @@ $btnToggleDaemon.Add_Click({
         if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
         try {
-            $pStop = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -File `"$StopScript`" -PauseMinutes 15 -Confirmed" -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-            if ($pStop.ExitCode -eq 0) {
-                Append-DashboardLog "[DAEMON] Sentinel Ultra shield paused for 15 minutes by Administrator via Dashboard."
-            } else {
-                Append-DashboardLog "[DAEMON] Shield pause request failed or was rejected (ExitCode: $($pStop.ExitCode))."
-            }
+            $pStop = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -File `"$StopScript`" -PauseMinutes 15 -Confirmed" -Verb RunAs -PassThru -WindowStyle Hidden -ErrorAction Stop
+            Watch-DaemonActionAsync -Process $pStop -SuccessLog "[DAEMON] Sentinel Ultra shield paused for 15 minutes by Administrator via Dashboard." -FailLogPrefix "[DAEMON] Shield pause request failed or was rejected"
         } catch {
             Append-DashboardLog "[DAEMON] Shield pause cancelled (Administrator elevation declined)."
+            Update-DashboardStatus
         }
     } else {
         # B2 & B3: Delegate start to Start-Shield.ps1 (verifies Trust Anchor SHA-256 & waits for active PIDs)
         try {
-            $pStart = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$StartScript`" -Quiet" -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-            if ($pStart.ExitCode -eq 0) {
-                Append-DashboardLog "[DAEMON] Sentinel Ultra shield verified and started via Dashboard."
-            } else {
-                Append-DashboardLog "[DAEMON] Shield failed Trust Anchor verification or startup check!"
-            }
+            $pStart = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$StartScript`" -Quiet" -PassThru -WindowStyle Hidden -ErrorAction Stop
+            Watch-DaemonActionAsync -Process $pStart -SuccessLog "[DAEMON] Sentinel Ultra shield verified and started via Dashboard." -FailLogPrefix "[DAEMON] Shield failed Trust Anchor verification or startup check"
         } catch {
             Append-DashboardLog "[DAEMON] Failed to invoke Start-Shield.ps1: $($_.Exception.Message)"
+            Update-DashboardStatus
         }
     }
-
-    Start-Sleep -Milliseconds 500
-    Update-DashboardStatus
 })
 
 # Button: Clear Log

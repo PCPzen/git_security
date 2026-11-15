@@ -19,6 +19,7 @@ if (-not (Test-Path $WatchdogPath)) {
 
 $TestStateDir = Join-Path $env:TEMP "SecuritySentinel_UnitTests_$PID"
 New-Item -ItemType Directory -Path $TestStateDir -Force | Out-Null
+$env:SENTINEL_TEST_MODE = "1"
 $env:SENTINEL_STATE_DIR = $TestStateDir
 
 try {
@@ -241,6 +242,55 @@ try {
         ($parsed4688.CommandLine -eq "cmd.exe /c whoami")
     )
 
+    Write-Host "`n[SUITE 11] Hardening Regression Checks (StateDir Gate, Pause Clamp, Log Tail-Truncation, Admin Vault)" -ForegroundColor Yellow
+    $savedMode = $env:SENTINEL_TEST_MODE
+    $savedDir  = $env:SENTINEL_STATE_DIR
+    try {
+        $env:SENTINEL_TEST_MODE = $null
+        $env:SENTINEL_STATE_DIR = Join-Path $env:TEMP "ShouldBeIgnoredWithoutTestMode"
+        $resolvedProd = Resolve-SentinelStateDir
+        Assert-Test -Name "SENTINEL_STATE_DIR is ignored when SENTINEL_TEST_MODE != 1" -Condition ($resolvedProd -eq (Join-Path $env:LOCALAPPDATA "SecuritySentinel"))
+
+        $env:SENTINEL_TEST_MODE = "1"
+        $env:SENTINEL_STATE_DIR = "C:\Windows\System32\EvilSentinelState"
+        $resolvedOutsideTemp = Resolve-SentinelStateDir
+        Assert-Test -Name "SENTINEL_STATE_DIR is rejected when outside %TEMP% even in test mode" -Condition ($resolvedOutsideTemp -eq (Join-Path $env:LOCALAPPDATA "SecuritySentinel"))
+    } finally {
+        $env:SENTINEL_TEST_MODE = $savedMode
+        $env:SENTINEL_STATE_DIR = $savedDir
+    }
+
+    $stopScriptText = Get-Content (Join-Path $CoreDir "Stop-Shield.ps1") -Raw -Encoding UTF8
+    Assert-Test -Name "Stop-Shield.ps1 clamps PauseMinutes with ValidateRange(1, 60)" -Condition ($stopScriptText -match 'ValidateRange\(1,\s*60\)')
+
+    $installScriptText = Get-Content (Join-Path $CoreDir "Install.ps1") -Raw -Encoding UTF8
+    Assert-Test -Name "Install.ps1 uses ErrorActionPreference=Stop and PublicHashes subkey" -Condition (
+        ($installScriptText -match "\`$ErrorActionPreference\s*=\s*'Stop'") -and
+        ($installScriptText -match "PublicHashes") -and
+        ($installScriptText -match "Set-AndVerifySentinelRegistryAcl")
+    )
+
+    # Log tail-truncation detection via sentinel.tip
+    $truncLog = Join-Path $TestStateDir "trunc_test.log"
+    $savedLogFile = $script:LogFile
+    $savedTipFile = $script:LogTipFile
+    try {
+        $script:LogFile    = $truncLog
+        $script:LogTipFile = "$truncLog.tip"
+        Remove-Item $truncLog, $script:LogTipFile -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "Chain entry 1" -Level "INFO"
+        Write-Log -Message "Chain entry 2" -Level "INFO"
+        Write-Log -Message "Chain entry 3 (tail)" -Level "WARN"
+        $beforeTrunc = Test-SentinelLogIntegrity -Path $truncLog
+        $lines = Get-Content -Path $truncLog -Encoding UTF8
+        [System.IO.File]::WriteAllLines($truncLog, $lines[0..1], [System.Text.Encoding]::UTF8)
+        $afterTrunc = Test-SentinelLogIntegrity -Path $truncLog
+        Assert-Test -Name "Test-SentinelLogIntegrity detects tail-truncation via sentinel.tip" -Condition ($beforeTrunc.Valid -and (-not $afterTrunc.Valid))
+    } finally {
+        $script:LogFile    = $savedLogFile
+        $script:LogTipFile = $savedTipFile
+    }
+
     Write-Host "`n======================================================================" -ForegroundColor Cyan
     Write-Host "   SUMMARY: $passedTests / $totalTests TESTS PASSED ($failedTests FAILED)" -ForegroundColor $(if ($failedTests -eq 0) { "Green" } else { "Red" })
     Write-Host "======================================================================" -ForegroundColor Cyan
@@ -251,6 +301,7 @@ try {
     Write-Host "        At: $($_.InvocationInfo.PositionMessage)" -ForegroundColor Yellow
     exit 1
 } finally {
+    $env:SENTINEL_TEST_MODE = $null
     $env:SENTINEL_STATE_DIR = $null
     Remove-Item -Path $TestStateDir -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -1,21 +1,31 @@
 # =====================================================================
 # Security Sentinel Ultra v8.0 - Start Shield
-# Verifies Trust Anchor SHA-256 & Authenticode before launching Watchdog
-# Waits for live Watchdog + Guardian Twin PIDs & heartbeat before success
+# Verifies Trust Anchor SHA-256 (PublicHashes / Manifest) before launch
+# Waits for live Watchdog + Guardian Twin PIDs before reporting success
 # =====================================================================
 param(
     [switch]$Quiet
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+
+function Resolve-SentinelStateDir {
+    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
+        try {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + "\"
+            $cand = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
+            if ($cand.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $cand
+            }
+        } catch {}
+    }
+    return $defaultDir
+}
 
 $ProgDir      = "$env:ProgramFiles\SecuritySentinel"
-$StateDir     = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
-    $env:SENTINEL_STATE_DIR
-} else {
-    "$env:LOCALAPPDATA\SecuritySentinel"
-}
+$StateDir     = Resolve-SentinelStateDir
 $SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
     $ProgDir
 } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
@@ -34,15 +44,16 @@ $PauseFile    = Join-Path $StateDir "paused_until.txt"
 
 function Get-SentinelSecret {
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
-    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-    if (Test-Path $regPath) {
-        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
+    $secKey = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $secKey) {
+        try {
+            $b64 = (Get-ItemProperty -Path $secKey -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
                 $bytes = [Convert]::FromBase64String($b64)
                 if ($bytes -and $bytes.Length -ge 16) { return $bytes }
-            } catch {}
-        }
+            }
+        } catch {}
+        return $null
     }
     $vaultFile = Join-Path $StateDir "vault.sec"
     if (Test-Path $vaultFile) {
@@ -56,11 +67,15 @@ function Get-SentinelSecret {
     return $null
 }
 
+# #1: Read non-secret hashes from PublicHashes (Users: ReadKey) first, then IntegrityAnchor, then User-Mode manifest.json
 function Get-TrustedScriptHash([string]$ScriptName) {
-    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-    if (Test-Path $regAnchor) {
-        $val = (Get-ItemProperty -Path $regAnchor -Name $ScriptName -ErrorAction SilentlyContinue).$ScriptName
-        if ($val) { return "$val".Trim().ToUpper() }
+    foreach ($regPath in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regPath) {
+            try {
+                $val = (Get-ItemProperty -Path $regPath -Name $ScriptName -ErrorAction SilentlyContinue).$ScriptName
+                if ($val) { return "$val".Trim().ToUpper() }
+            } catch {}
+        }
     }
     if (Test-Path $ManifestFile) {
         try {
@@ -88,7 +103,7 @@ if (-not $Quiet) {
     Write-Host "==========================================================" -ForegroundColor Cyan
 }
 
-# 1. Check if already running (with proper ([int]$curPid) cast)
+# 1. Check if already running (with proper ([int]$pidInt) cast)
 if (Test-Path $PidFile) {
     $curPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
     if ($curPid -and ($curPid.Trim() -match '^\d+$')) {
@@ -132,13 +147,11 @@ if (Test-Path $GuardianPath -PathType Leaf) {
 # 3. Clear any leftover stop token or pause timer
 if (Test-Path $StopFlagFile) { Remove-Item $StopFlagFile -Force -ErrorAction SilentlyContinue }
 if (Test-Path $PauseFile) { Remove-Item $PauseFile -Force -ErrorAction SilentlyContinue }
-Unregister-ScheduledTask -TaskName "SecuritySentinelAutoResume" -Confirm:$false -ErrorAction SilentlyContinue
+try { Unregister-ScheduledTask -TaskName "SecuritySentinelAutoResume" -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
 # 4. Try starting registered Scheduled Task first, then verified direct launch
-$launchedViaTask = $false
 try {
     Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop
-    $launchedViaTask = $true
     if (-not $Quiet) {
         Write-Host "[INIT] Triggered 'SecuritySentinelWatchdog' via Windows Task Scheduler..." -ForegroundColor Cyan
     }
@@ -166,7 +179,7 @@ for ($i = 0; $i -lt 16; $i++) {
         $rawW = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($rawW -and ($rawW.Trim() -match '^\d+$')) {
             $wInt = [int]$rawW.Trim()
-            $wProc = Get-Process -Id $wInt -ErrorAction SilentlyContinue
+            $wProc = Get-Process -Id ([int]$wInt) -ErrorAction SilentlyContinue
             if ($wProc -and $wProc.ProcessName -match '^(powershell|pwsh)$') {
                 $wdAlive = $true
                 $verifiedWdPid = $wInt
@@ -177,7 +190,7 @@ for ($i = 0; $i -lt 16; $i++) {
         $rawG = (Get-Content $GuardianPidF -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($rawG -and ($rawG.Trim() -match '^\d+$')) {
             $gInt = [int]$rawG.Trim()
-            $gProc = Get-Process -Id $gInt -ErrorAction SilentlyContinue
+            $gProc = Get-Process -Id ([int]$gInt) -ErrorAction SilentlyContinue
             if ($gProc -and $gProc.ProcessName -match '^(powershell|pwsh)$') {
                 $gdAlive = $true
                 $verifiedGdPid = $gInt

@@ -14,12 +14,14 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
         }
         $script:PesterStateDir = Join-Path $env:TEMP "SecuritySentinel_Pester_$PID"
         New-Item -ItemType Directory -Path $script:PesterStateDir -Force | Out-Null
+        $env:SENTINEL_TEST_MODE = "1"
         $env:SENTINEL_STATE_DIR = $script:PesterStateDir
         . $WatchdogScript -LibraryOnly
         $script:TrustAnchorHashes = Initialize-CodeIntegrityTrustAnchor
     }
 
     AfterAll {
+        $env:SENTINEL_TEST_MODE = $null
         $env:SENTINEL_STATE_DIR = $null
         if ($script:PesterStateDir -and (Test-Path $script:PesterStateDir)) {
             Remove-Item -Path $script:PesterStateDir -Recurse -Force -ErrorAction SilentlyContinue

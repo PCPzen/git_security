@@ -43,15 +43,26 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\core\Invoke-RedTeamAudit.ps1
 
+      - name: Run Pester Unit Tests (SecuritySentinel.Tests.ps1)
+        shell: powershell
+        run: |
+          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -ge [version]'5.0.0' })) {
+              Install-Module -Name Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+          }
+          Import-Module Pester -MinimumVersion 5.0.0 -ErrorAction Stop
+          $res = Invoke-Pester -Path .\tests\SecuritySentinel.Tests.ps1 -PassThru
+          if ($res.FailedCount -gt 0) { exit 1 }
+
       - name: Run PSScriptAnalyzer Static Analysis
         shell: powershell
         run: |
-          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction SilentlyContinue
-          if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
-              $findings = Invoke-ScriptAnalyzer -Path .\core -Severity Error -Recurse
-              if ($findings) {
-                  $findings | Format-Table -AutoSize
-                  exit 1
-              }
-              Write-Host "[OK] Zero PSScriptAnalyzer Error-level findings in .\core" -ForegroundColor Green
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+              Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
           }
+          Import-Module PSScriptAnalyzer -ErrorAction Stop
+          $findings = Invoke-ScriptAnalyzer -Path .\core -Severity Error -Recurse
+          if ($findings) {
+              $findings | Format-Table -AutoSize
+              exit 1
+          }
+          Write-Host "[OK] Zero PSScriptAnalyzer Error-level findings in .\core" -ForegroundColor Green

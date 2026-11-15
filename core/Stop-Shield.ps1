@@ -1,23 +1,34 @@
 # =====================================================================
 # Security Sentinel Ultra v8.0 - Stop Shield (Authenticated & Elevated)
-# Enforces Administrator Elevation, Explicit Confirmation, Event Logging,
-# 15-Minute Auto-Resume & Self-Termination via Token (Zero Force-Kill!)
+# Enforces Administrator Elevation, Clamped Pause (1-60 min), EventLog,
+# Auto-Resume & Self-Termination via Token (Zero Force-Kill!)
 # =====================================================================
 param(
+    [ValidateRange(1, 60)]
     [int]$PauseMinutes = 15,
     [switch]$NoElevate,
     [switch]$Confirmed
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+
+function Resolve-SentinelStateDir {
+    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
+        try {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + "\"
+            $cand = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
+            if ($cand.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $cand
+            }
+        } catch {}
+    }
+    return $defaultDir
+}
 
 $ProgDir       = "$env:ProgramFiles\SecuritySentinel"
-$StateDir      = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
-    $env:SENTINEL_STATE_DIR
-} else {
-    "$env:LOCALAPPDATA\SecuritySentinel"
-}
+$StateDir      = Resolve-SentinelStateDir
 $SentinelDir   = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
     $ProgDir
 } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
@@ -64,18 +75,19 @@ if (-not $Confirmed) {
     }
 }
 
-# 3. Retrieve Secret via Unified Fail-Closed Loader (A3 - Never uses public static constant!)
+# 3. Retrieve Secret via Unified Fail-Closed Loader (Never falls back to vault.sec when HKLM IntegrityAnchor exists!)
 function Get-SentinelSecret {
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
-        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
+        try {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
                 $bytes = [Convert]::FromBase64String($b64)
                 if ($bytes -and $bytes.Length -ge 16) { return $bytes }
-            } catch {}
-        }
+            }
+        } catch {}
+        return $null
     }
     $vaultFile = Join-Path $StateDir "vault.sec"
     if (Test-Path $vaultFile) {

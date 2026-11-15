@@ -25,12 +25,22 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
-$ProgDir      = "$env:ProgramFiles\SecuritySentinel"
-$StateDir     = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
-    $env:SENTINEL_STATE_DIR
-} else {
-    "$env:LOCALAPPDATA\SecuritySentinel"
+function Resolve-SentinelStateDir {
+    $defaultDir = "$env:LOCALAPPDATA\SecuritySentinel"
+    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
+        try {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + "\"
+            $cand = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
+            if ($cand.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $cand
+            }
+        } catch {}
+    }
+    return $defaultDir
 }
+
+$ProgDir      = "$env:ProgramFiles\SecuritySentinel"
+$StateDir     = Resolve-SentinelStateDir
 $SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
     $ProgDir
 } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
@@ -40,6 +50,7 @@ $SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
 }
 $ConfigFile   = "$StateDir\config.json"
 $LogFile      = "$StateDir\logs\sentinel.log"
+$LogTipFile   = "$StateDir\logs\sentinel.tip"
 $QuarDir      = "$StateDir\quarantine"
 $QuarManifest = "$QuarDir\quarantine_manifest.json"
 $PidFile      = "$StateDir\sentinel.pid"
@@ -396,16 +407,18 @@ function Get-InstallationSecretBytes {
     # 1. Read from HKLM InstallSecret (SYSTEM + Administrators ACL protected)
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
-        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
+        try {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
                 $bytes = [Convert]::FromBase64String($b64)
                 if ($bytes -and $bytes.Length -ge 16) { return $bytes }
-            } catch {}
-        }
+            }
+        } catch {}
+        # If HKLM IntegrityAnchor exists (Admin install) and caller cannot read it, FAIL CLOSED (never fall back to vault.sec!)
+        return $null
     }
 
-    # 2. A3: Unified DPAPI-protected 256-bit CSPRNG vault file ($StateDir\vault.sec) for user-mode consistency
+    # 2. User-Mode only: Unified DPAPI-protected 256-bit CSPRNG vault file ($StateDir\vault.sec)
     $vaultFile = Join-Path $StateDir "vault.sec"
     if (Test-Path $vaultFile) {
         try {
@@ -416,7 +429,7 @@ function Get-InstallationSecretBytes {
         } catch {}
     }
 
-    # 3. Generate and persist 256-bit CSPRNG secret in DPAPI vault.sec (never static constant!)
+    # 3. User-Mode only: Generate and persist 256-bit CSPRNG secret in DPAPI vault.sec (never static constant!)
     $rngBytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $rng.GetBytes($rngBytes)
@@ -605,12 +618,10 @@ $script:Config = Load-SentinelConfig
 # ---------------------------------------------------------------------
 function Compute-LogLineHmac {
     param([string]$PrevHmac, [string]$CoreLine)
-    $keyBytes = if ($script:SentinelEntropyBytes -and $script:SentinelEntropyBytes.Length -ge 16) {
-        $script:SentinelEntropyBytes
-    } else {
-        [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_LOG_HMAC_DEFAULT_KEY_V8")
+    if (-not $script:SentinelEntropyBytes -or $script:SentinelEntropyBytes.Length -lt 16) {
+        return ""
     }
-    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$keyBytes)
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$script:SentinelEntropyBytes)
     $hashBytes = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$PrevHmac|$CoreLine"))
     $hmac.Dispose()
     return ([BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16))
@@ -651,19 +662,25 @@ function Write-Log {
     Write-SentinelEventLog -Message $Message -Level $Level
 
     try {
-        $prevHmac = "0000000000000000"
-        if (Test-Path $LogFile) {
-            $lastLn = Get-Content -Path $LogFile -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
-            if ($lastLn -and $lastLn -match "\[HMAC:([0-9A-Fa-f]{16})\]$") {
-                $prevHmac = $Matches[1].ToUpper()
+        if (-not $script:SentinelEntropyBytes -or $script:SentinelEntropyBytes.Length -lt 16) {
+            Add-Content -Path $LogFile -Value "$coreLine [HMAC:UNAVAILABLE]" -Encoding UTF8 -ErrorAction SilentlyContinue
+        } else {
+            $prevHmac = "0000000000000000"
+            if (Test-Path $LogFile) {
+                $lastLn = Get-Content -Path $LogFile -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($lastLn -and $lastLn -match "\[HMAC:([0-9A-Fa-f]{16})\]$") {
+                    $prevHmac = $Matches[1].ToUpper()
+                }
+            }
+            $newHmac = Compute-LogLineHmac -PrevHmac $prevHmac -CoreLine $coreLine
+            $fullLine = "$coreLine [HMAC:$newHmac]"
+            Add-Content -Path $LogFile -Value $fullLine -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($LogTipFile) {
+                $tipEnc = Protect-DpapiString $newHmac
+                if ($tipEnc) { [System.IO.File]::WriteAllText($LogTipFile, $tipEnc, [System.Text.Encoding]::UTF8) }
             }
         }
-        $newHmac = Compute-LogLineHmac -PrevHmac $prevHmac -CoreLine $coreLine
-        $fullLine = "$coreLine [HMAC:$newHmac]"
-        Add-Content -Path $LogFile -Value $fullLine -Encoding UTF8 -ErrorAction SilentlyContinue
-    } catch {
-        $fullLine = $coreLine
-    }
+    } catch {}
     if (-not $LibraryOnly) {
         Write-Output $coreLine
     }
@@ -673,6 +690,9 @@ function Test-SentinelLogIntegrity {
     param([string]$Path = $LogFile)
     if (-not (Test-Path $Path)) {
         return @{ Valid = $true; TotalLines = 0; TamperedLine = 0; Reason = "LogFileNotPresent" }
+    }
+    if (-not $script:SentinelEntropyBytes -or $script:SentinelEntropyBytes.Length -lt 16) {
+        return @{ Valid = $false; TotalLines = 0; TamperedLine = 0; Reason = "SecretUnavailable" }
     }
     $lines = @(Get-Content -Path $Path -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $prevHmac = "0000000000000000"
@@ -689,6 +709,13 @@ function Test-SentinelLogIntegrity {
             return @{ Valid = $false; TotalLines = $lines.Count; TamperedLine = $lineIdx; Reason = "HmacMismatchAtLine_$lineIdx" }
         }
         $prevHmac = $claimedHmac
+    }
+    # Verify chain tail against sealed tip to detect end-of-file truncation!
+    if ($lines.Count -gt 0 -and $LogTipFile -and (Test-Path $LogTipFile)) {
+        $sealedTip = Unprotect-DpapiString ((Get-Content $LogTipFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue))
+        if ($sealedTip -and ($sealedTip.Trim().ToUpper() -ne $prevHmac)) {
+            return @{ Valid = $false; TotalLines = $lines.Count; TamperedLine = $lines.Count; Reason = "LogTailTruncatedOrModified" }
+        }
     }
     return @{ Valid = $true; TotalLines = $lines.Count; TamperedLine = 0; Reason = "VerifiedChain" }
 }
@@ -711,10 +738,11 @@ $script:AuthorizedCoreScripts = @(
 )
 
 function Get-TrustedCertThumbprint {
-    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-    if (Test-Path $regAnchor) {
-        $tp = (Get-ItemProperty -Path $regAnchor -Name "TrustedCertThumbprint" -ErrorAction SilentlyContinue).TrustedCertThumbprint
-        if ($tp) { return "$tp".Trim().ToUpper() }
+    foreach ($regAnchor in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regAnchor) {
+            $tp = (Get-ItemProperty -Path $regAnchor -Name "TrustedCertThumbprint" -ErrorAction SilentlyContinue).TrustedCertThumbprint
+            if ($tp) { return "$tp".Trim().ToUpper() }
+        }
     }
     if (Test-Path $ManifestFile) {
         try {
@@ -752,16 +780,18 @@ function Test-SentinelScriptSignature {
 
 function Get-TrustedScriptHashes {
     $hashes = @{}
-    # 1. Read exclusively from HKLM IntegrityAnchor (SYSTEM/Administrators ACL locked)
-    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
-    if (Test-Path $regAnchor) {
-        $props = Get-ItemProperty -Path $regAnchor -ErrorAction SilentlyContinue
-        if ($props) {
-            foreach ($sName in $script:AuthorizedCoreScripts) {
-                if ($props.$sName -and (-not $hashes.ContainsKey($sName))) {
-                    $hashes[$sName] = "$($props.$sName)"
+    # 1. Read non-secret hashes from HKLM PublicHashes or IntegrityAnchor
+    foreach ($regAnchor in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+        if (Test-Path $regAnchor) {
+            $props = Get-ItemProperty -Path $regAnchor -ErrorAction SilentlyContinue
+            if ($props) {
+                foreach ($sName in $script:AuthorizedCoreScripts) {
+                    if ($props.$sName -and (-not $hashes.ContainsKey($sName))) {
+                        $hashes[$sName] = "$($props.$sName)"
+                    }
                 }
             }
+            if ($hashes.Count -gt 0) { break }
         }
     }
     # 2. Fallback to DPAPI-sealed manifest.json (Never fallback to raw unverified disk files!)

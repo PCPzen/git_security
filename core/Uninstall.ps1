@@ -2,12 +2,37 @@
 # Security Sentinel Ultra v8.0 - Enterprise Uninstaller
 # Clean Removal, Unified CSPRNG Stop-Token & ACL Reset
 # =====================================================================
+param(
+    [string]$InstallDir = ""
+)
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 
-$StateDir     = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) { $env:SENTINEL_STATE_DIR } else { "$env:LOCALAPPDATA\SecuritySentinel" }
+function Resolve-SentinelStateDir {
+    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
+        try {
+            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+            $candidate = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
+            if ($candidate.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $candidate
+            }
+        } catch {}
+    }
+    return $defaultDir
+}
+
+$StateDir     = Resolve-SentinelStateDir
 $ProgDir      = "$env:ProgramFiles\SecuritySentinel"
+$RegInstallDir = $null
+foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
+    if (Test-Path $rp) {
+        $d = (Get-ItemProperty -Path $rp -Name "InstallDir" -ErrorAction SilentlyContinue).InstallDir
+        if ($d) { $RegInstallDir = $d; break }
+    }
+}
 $PidFile      = "$StateDir\sentinel.pid"
 $GuardianPidF = "$StateDir\guardian.pid"
 $StopTokenF   = "$StateDir\graceful_stop.token"
@@ -17,13 +42,14 @@ function Get-SentinelSecret {
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
-        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
+        try {
+            $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction Stop).InstallSecret
+            if ($b64) {
                 $bytes = [Convert]::FromBase64String($b64)
                 if ($bytes -and $bytes.Length -ge 16) { return $bytes }
-            } catch {}
-        }
+            }
+        } catch {}
+        return $null
     }
     $vaultFile = Join-Path $StateDir "vault.sec"
     if (Test-Path $vaultFile) {
@@ -75,9 +101,11 @@ Unregister-ScheduledTask -TaskName "SecuritySentinelGuardian" -Confirm:$false -E
 Unregister-ScheduledTask -TaskName "SecuritySentinelAutoResume" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "HKLM:\SOFTWARE\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
-if (Test-Path $ProgDir) {
-    icacls "$ProgDir\*.ps1" /reset /T /C /Q 2>&1 | Out-Null
-    Remove-Item $ProgDir -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($targetDir in @($ProgDir, $RegInstallDir, $InstallDir) | Where-Object { $_ } | Select-Object -Unique) {
+    if (Test-Path $targetDir) {
+        icacls "$targetDir\*.ps1" /reset /T /C /Q 2>&1 | Out-Null
+        Remove-Item $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 Write-Host "  -> Tasks and Trust Anchors removed." -ForegroundColor Green
 
