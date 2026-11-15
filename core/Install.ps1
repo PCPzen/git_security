@@ -259,6 +259,13 @@ foreach ($s in $coreScripts) {
         Copy-Item $srcFile $dstFile -Force
     }
 }
+foreach ($asset in @("sentinel.ico", "sentinel.png", "sentinel.jpg")) {
+    $srcAsset = Join-Path $SourceDir $asset
+    $dstAsset = Join-Path $TargetDir $asset
+    if ((Test-Path $srcAsset) -and ($srcAsset -ne $dstAsset)) {
+        Copy-Item $srcAsset $dstAsset -Force
+    }
+}
 
 # Generate Fail-Closed External Code Integrity Trust Anchor
 $hashes = [ordered]@{}

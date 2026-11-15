@@ -113,7 +113,28 @@ function Test-TrustedScriptIntegrity([string]$FilePath) {
 $appContext = New-Object System.Windows.Forms.ApplicationContext
 $notify = New-Object System.Windows.Forms.NotifyIcon
 
-$notify.Icon = [System.Drawing.SystemIcons]::Shield
+$customIcon = $null
+foreach ($dir in @($SentinelDir, $StateDir)) {
+    if (-not $dir) { continue }
+    $icoPath = Join-Path $dir "sentinel.ico"
+    if (Test-Path $icoPath -PathType Leaf) {
+        try { $customIcon = New-Object System.Drawing.Icon($icoPath); break } catch {}
+    }
+    foreach ($ext in @("sentinel.png", "sentinel.jpg")) {
+        $imgPath = Join-Path $dir $ext
+        if (Test-Path $imgPath -PathType Leaf) {
+            try {
+                $bmp = New-Object System.Drawing.Bitmap($imgPath)
+                $scaled = New-Object System.Drawing.Bitmap($bmp, (New-Object System.Drawing.Size(64, 64)))
+                $customIcon = [System.Drawing.Icon]::FromHandle($scaled.GetHicon())
+                $bmp.Dispose()
+                break
+            } catch {}
+        }
+    }
+    if ($customIcon) { break }
+}
+$notify.Icon = if ($customIcon) { $customIcon } else { [System.Drawing.SystemIcons]::Shield }
 $notify.Text = "Security Sentinel Ultra v8.0"
 $notify.Visible = $true
 
