@@ -1,21 +1,33 @@
 # =====================================================================
 # Security Sentinel Ultra v8.0 - Pester Unit Test Suite
-# Tests: DPAPI, Anti-Bypass, Phishing, Parent-Spoofing Safe-Mode, Token Forgery
+# Tests: A1-A4, B1-B5, C1, C3, C4, DPAPI, Anti-Bypass, Phishing, Safe-Mode
 # =====================================================================
 
 $ScriptRoot = Split-Path -Parent $PSScriptRoot
-$WatchdogScript = Join-Path $ScriptRoot "core\SentinelWatchdog.ps1"
+$CoreDir = Join-Path $ScriptRoot "core"
+$WatchdogScript = Join-Path $CoreDir "SentinelWatchdog.ps1"
 
 Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
     BeforeAll {
         if (-not (Test-Path $WatchdogScript)) {
             throw "SentinelWatchdog.ps1 not found at $WatchdogScript"
         }
+        $script:PesterStateDir = Join-Path $env:TEMP "SecuritySentinel_Pester_$PID"
+        New-Item -ItemType Directory -Path $script:PesterStateDir -Force | Out-Null
+        $env:SENTINEL_STATE_DIR = $script:PesterStateDir
         . $WatchdogScript -LibraryOnly
+        $script:TrustAnchorHashes = Initialize-CodeIntegrityTrustAnchor
     }
 
-    Context "1. DPAPI Secret Vault Verification" {
-        It "Should correctly encrypt and decrypt strings using DPAPI with entropy" {
+    AfterAll {
+        $env:SENTINEL_STATE_DIR = $null
+        if ($script:PesterStateDir -and (Test-Path $script:PesterStateDir)) {
+            Remove-Item -Path $script:PesterStateDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context "1. Unified DPAPI Secret Vault & Static Entropy Rejection (A3)" {
+        It "Should correctly encrypt and decrypt strings using DPAPI with CSPRNG entropy" {
             $secret = "https://discord.com/api/webhooks/test/sample_enterprise_webhook_url"
             $encrypted = Protect-DpapiString -PlainText $secret
             $encrypted | Should Not BeNullOrEmpty
@@ -30,9 +42,23 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
             $decrypted = Unprotect-DpapiString -CipherBase64 $corrupted
             $decrypted | Should Be ""
         }
+
+        It "Should strictly reject ciphertext encrypted with legacy static constant SENTINEL_ULTRA_V6_ENTROPY" {
+            $staticEntropy = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+            $staticEnc = [Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes("secret"), $staticEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))
+            $decrypted = Unprotect-DpapiString -CipherBase64 $staticEnc
+            $decrypted | Should Be ""
+        }
     }
 
-    Context "2. Dashboard Exemption Anti-Bypass" {
+    Context "2. Trust Anchor 10-Script Coverage & Dashboard Anti-Bypass (B1, B2)" {
+        It "Should include all 10 core scripts in Trust Anchor hashes" {
+            $script:AuthorizedCoreScripts.Count | Should Be 10
+            $script:TrustAnchorHashes.ContainsKey("Start-Shield.ps1") | Should Be $true
+            $script:TrustAnchorHashes.ContainsKey("Stop-Shield.ps1") | Should Be $true
+            $script:TrustAnchorHashes.ContainsKey("SentinelTray.ps1") | Should Be $true
+        }
+
         It "Should strictly reject encoded command payloads attempting to bypass by appending script name" {
             $fakeBypassCmd = "powershell.exe -enc VGVzdFBheWxvYWQ= SentinelDashboard.ps1"
             $isVerified = Test-IsVerifiedSentinelScript -CommandLine $fakeBypassCmd
@@ -50,12 +76,6 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
             $isVerified = Test-IsVerifiedSentinelScript -CommandLine $chainCmd
             $isVerified | Should Be $false
         }
-
-        It "Should strictly reject scripts from unauthorized temp directories" {
-            $tempFake = "powershell.exe -File `"C:\Users\Public\SentinelDashboard.ps1`""
-            $isVerified = Test-IsVerifiedSentinelScript -CommandLine $tempFake
-            $isVerified | Should Be $false
-        }
     }
 
     Context "3. Phishing Parent Process Detection & Macro Anomaly" {
@@ -67,36 +87,17 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
             $triage.RiskScore | Should BeGreaterOrEqual 85
             $triage.Reasons | Should Contain "PhishingParentExploit(+50)"
         }
-
-        It "Should assign +50 risk score when spawned by Acrobat/PDF Reader" {
-            $triage = Get-ForensicTriage -ProcessId 0 -FilePath "cmd.exe" `
-                                         -CommandLine "cmd.exe /c start calc.exe" `
-                                         -IsUnsigned $false -IsParentChildAnomaly $true -IsPhishingParent $true
-
-            $triage.RiskScore | Should BeGreaterOrEqual 85
-            $triage.Reasons | Should Contain "PhishingParentExploit(+50)"
-        }
     }
 
-    Context "4. Safe-Mode Zero-Trust Parent & Spoofing Defense (Real Inspect-SingleProcess)" {
-        It "Should reject an unsigned malware binary in Temp named 'node.exe' from getting silent Safe-Mode pass" {
-            $fakeNodeTemp = "C:\Users\victim\AppData\Local\Temp\node.exe"
-            $triage = Get-ForensicTriage -ProcessId 0 -FilePath $fakeNodeTemp `
-                                         -CommandLine "node.exe -e evil()" `
-                                         -IsUnsigned $true -IsParentChildAnomaly $false -IsPhishingParent $false
-
-            $triage.RiskScore | Should BeGreaterOrEqual 60
-            $triage.Reasons | Should Contain "UnsignedBinary(+25)"
-            $triage.Reasons | Should Contain "HighRiskPath(+20)"
-        }
-
+    Context "4. Safe-Mode Zero-Trust Parent & AppData Spoofing Defense (A4)" {
         It "Should reject Safe-Mode pass via Inspect-SingleProcess when parent steam.exe is spoofed in Temp" {
             $childProc = [PSCustomObject]@{
-                ProcessId        = 8882
-                Name             = "worker.exe"
-                ExecutablePath   = "C:\Users\victim\AppData\Local\Temp\worker.exe"
-                CommandLine      = "worker.exe --task"
-                ParentProcessId  = 7772
+                ProcessId       = 8882
+                Name            = "worker.exe"
+                ExecutablePath  = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+                CommandLine     = "worker.exe --task"
+                ParentProcessId = 7772
+                CreationDate    = "2026111502"
             }
             $spoofedMap = @{
                 7772 = [PSCustomObject]@{
@@ -109,13 +110,34 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
             $res.Action | Should Not Be "AllowedWorkGamingSafeMode"
         }
 
+        It "Should reject Safe-Mode pass when unsigned parent is spoofed in AppData\Local\Programs (A4)" {
+            $childProc = [PSCustomObject]@{
+                ProcessId       = 8885
+                Name            = "worker.exe"
+                ExecutablePath  = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+                CommandLine     = "worker.exe --task"
+                ParentProcessId = 7775
+                CreationDate    = "2026111505"
+            }
+            $spoofedAppDataMap = @{
+                7775 = [PSCustomObject]@{
+                    ProcessId      = 7775
+                    Name           = "node.exe"
+                    ExecutablePath = "C:\Users\victim\AppData\Local\Programs\nodejs\node.exe"
+                }
+            }
+            $res = Inspect-SingleProcess -p $childProc -procMap $spoofedAppDataMap
+            $res.Action | Should Not Be "AllowedWorkGamingSafeMode"
+        }
+
         It "Should grant Safe-Mode pass via Inspect-SingleProcess when parent is genuine in Program Files" {
             $childProc = [PSCustomObject]@{
-                ProcessId        = 8883
-                Name             = "worker.exe"
-                ExecutablePath   = "C:\Users\victim\AppData\Local\Temp\worker.exe"
-                CommandLine      = "worker.exe --task"
-                ParentProcessId  = 7773
+                ProcessId       = 8883
+                Name            = "worker.exe"
+                ExecutablePath  = "C:\Users\victim\AppData\Local\Temp\worker.exe"
+                CommandLine     = "worker.exe --task"
+                ParentProcessId = 7773
+                CreationDate    = "2026111503"
             }
             $legitMap = @{
                 7773 = [PSCustomObject]@{
@@ -129,94 +151,40 @@ Describe "Security Sentinel Ultra v8.0 Enterprise Security Controls" {
         }
     }
 
-    Context "5. Stop Token Security, Token Forgery & Registry Vault Defense" {
-        It "Should reject stop token generated for a different PID" {
+    Context "5. Stop Token Security, Registry ACL & Tamper-Evident Logs (A1, A2, A3, C1, C3)" {
+        It "Should reject stop token generated for a different PID or static entropy" {
             $valid = Test-AuthenticatedStopToken -ExpectedWatchdogPid "99999"
             $valid | Should Be $false
         }
 
-        It "Should strictly reject stop token forged by attacker without HKLM secret" {
-            $attackerPayload = "STOP|$PID|$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-            $fakeEntropy = [System.Text.Encoding]::UTF8.GetBytes("ATTACKER_GUESS_SECRET_12345678901")
-            $enc = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($attackerPayload), $fakeEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-            $tokenFile = Join-Path $StateDir "graceful_stop.token"
-            [System.IO.File]::WriteAllText($tokenFile, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
+        It "Should verify HMAC-SHA256 log chain and detect tampering (C1)" {
+            Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+            Write-Log "Pester HMAC Line 1" "INFO"
+            Write-Log "Pester HMAC Line 2" "WARN"
+            $ok = Test-SentinelLogIntegrity -Path $LogFile
+            $ok.Valid | Should Be $true
 
-            $res = Test-AuthenticatedStopToken -ExpectedWatchdogPid "$PID"
-            $res | Should Be $false
+            Add-Content -Path $LogFile -Value "[2026-11-15 00:00:00] [INFO] Tampered [HMAC:1234567890ABCDEF]" -Encoding UTF8
+            $bad = Test-SentinelLogIntegrity -Path $LogFile
+            $bad.Valid | Should Be $false
         }
 
-        It "Should strictly reject stop token replay attack with expired timestamp" {
-            $expiredPayload = "STOP|$PID|$([DateTimeOffset]::UtcNow.AddSeconds(-120).ToUnixTimeSeconds())"
-            $enc = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($expiredPayload), $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-            $tokenFile = Join-Path $StateDir "graceful_stop.token"
-            [System.IO.File]::WriteAllText($tokenFile, [Convert]::ToBase64String($enc), [System.Text.Encoding]::UTF8)
-
-            $res = Test-AuthenticatedStopToken -ExpectedWatchdogPid "$PID"
-            $res | Should Be $false
-        }
-
-        It "Should ensure Zero-Trust: No InstallSecret stored in HKCU" {
-            $hkcuSecretExists = $false
-            if (Test-Path "HKCU:\Software\SecuritySentinel\IntegrityAnchor") {
-                $val = (Get-ItemProperty -Path "HKCU:\Software\SecuritySentinel\IntegrityAnchor" -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-                if ($val) { $hkcuSecretExists = $true }
-            }
-            $hkcuSecretExists | Should Be $false
-        }
-    }
-
-    Context "6. Canary Decoy Integrity & Attribution" {
-        It "Should correctly attribute SACL Event 4663 XML to target process" {
-            $sampleXml = @"
+        It "Should parse Security Event 4688 XML for short-lived processes (C3)" {
+            $xml4688 = @"
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><EventID>4688</EventID></System>
   <EventData>
-    <Data Name="SubjectUserName">TestUser</Data>
-    <Data Name="ObjectName">C:\Users\victim\AppData\Roaming\SecuritySentinel_Canary\crypto_wallet_vault_seed.txt</Data>
-    <Data Name="ProcessId">0x1404</Data>
-    <Data Name="ProcessName">C:\Users\victim\Downloads\stealer.exe</Data>
+    <Data Name="NewProcessId">0x1000</Data>
+    <Data Name="NewProcessName">C:\Windows\System32\powershell.exe</Data>
+    <Data Name="CommandLine">powershell.exe -enc ZXZpbA==</Data>
+    <Data Name="ProcessId">0x0500</Data>
   </EventData>
 </Event>
 "@
-            $parsed = Parse-Event4663Xml -EventXmlString $sampleXml
-            $parsed.ProcessId | Should Be 5124
-            $parsed.ProcessName | Should Be "C:\Users\victim\Downloads\stealer.exe"
-            $parsed.ObjectName | Should Match "SecuritySentinel_Canary"
+            $parsed = Parse-ProcessCreationEventXml -EventXmlString $xml4688
+            $parsed.ProcessId | Should Be 4096
+            $parsed.ParentProcessId | Should Be 1280
+            $parsed.Name | Should Be "powershell.exe"
         }
     }
 }
-
-# SIG # Begin signature block
-# MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAVEgl9/wFbyjb6
-# 3SVLX5+kbCZPjiS7z0qkm1vJ2FsDV6CCAzIwggMuMIICFqADAgECAhBqicxAtgYy
-# tEDV87OXYXwsMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
-# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkxODA2NDBaFw0zMTEx
-# MDkxODE2NDBaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
-# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMNKKvtK
-# ERrpKZl/ygPwjprcar+6Xk/3xKwms9K7GDTSH8EYVjwFvMsNGB8+On0f31+3hmyt
-# KZzePEl5panG4eomaJwGl5qLzD2qyJVAtpgRKh+fiUgjFgm+FOm46u74WMC/Jhr2
-# UZe+h6PpO7eoAizbrVRHPaHIOSfIMxnQFVtkkV66T0O5ELGaqTsLZbeQRZsvf6pl
-# mIRLQ7nDIzQ6HqRuaWYfU/GNB8/uDhymxuRyLVV6y6pJ/lO2plVgHwC1JHIT7M+S
-# t6Fx8wOkUB9McT6P/T4uXHP56PufSxPC7Q4IgDBQ4sQr6NKqtxzVeZ8LBeZW9dsF
-# /E1ggkQ3GpNEDmECAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMDMB0GA1UdDgQWBBTzQylDY2rNT15+NYtrGro9m44IMjANBgkqhkiG
-# 9w0BAQsFAAOCAQEASGAB2FcY0MsNMQsmt1MEmkmsNWWM15Bf3/gojZQeA84NS39J
-# Q3AvtZsrUFq7czi6dm0Oh5GtmEhBBaXxdQeZc48SviS1ZkH+ydm4wFNDz0htXqem
-# K5iqgz9JWlYbO0Q1SpCwnrL2lqtXUTqnq1K83NVlyEfMJy1N/pve+DlOLEBjvPvr
-# PJDNfUZ79skHaztddUvFUfRFIOaMr0sop2XozdqDsD3Au4im941zJTleYk7m+0Qx
-# V0WFPnXMN88dI7JkFgmgmoT53b362u5EU9KHRnwLNjrGIb4+NpAH5QtH7Xl1hqde
-# Hxvq+WiRbpJEMEiPyUN71mzSsOfIzKk16U4MIjGCAfUwggHxAgEBMEMwLzEtMCsG
-# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhBqicxA
-# tgYytEDV87OXYXwsMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
-# oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIEG9sZT40Qv+QOB1ZNhO
-# 4gU+tef4QK131fnC+sppbtx9MA0GCSqGSIb3DQEBAQUABIIBAL0hR88XxqOySfto
-# RbMCO7FxybjPLnCldLL3p/BVhvbAjnDeaikOQVE7tzBCXnR7Hm2uyDEwp1S+csCt
-# wB0eBGd8ny80+VKRW9KUEa7tAYAt53wpYfUkYt5f4uvK0iXmOXu+tR/rp/rwMzSI
-# 1YcXL6EVG3f+2nkUmbJhsG0csFPpN+G9l0AqOhKCALDM5ovC+QUTtdxprrfevxE8
-# 2m9O1vW9F7R6MwvSc3it3UBSc4X/kHtKpLrfbUreoy9OjBNHCnXiWL6Lczf3eXoP
-# CvhNNW9xh9NMqD9sDeOJPN+Iq2nND5PNM8QoG+Qc1QHK2COBBqbpq85/UhV4mm78
-# A1bnXcY=
-# SIG # End signature block

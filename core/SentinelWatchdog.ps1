@@ -25,12 +25,19 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
-$SentinelDir  = if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1")) -and ($PSScriptRoot -match "Program Files")) {
-    $PSScriptRoot
+$ProgDir      = "$env:ProgramFiles\SecuritySentinel"
+$StateDir     = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
+    $env:SENTINEL_STATE_DIR
 } else {
     "$env:LOCALAPPDATA\SecuritySentinel"
 }
-$StateDir     = "$env:LOCALAPPDATA\SecuritySentinel"
+$SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
+    $ProgDir
+} elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
+    $PSScriptRoot
+} else {
+    $StateDir
+}
 $ConfigFile   = "$StateDir\config.json"
 $LogFile      = "$StateDir\logs\sentinel.log"
 $QuarDir      = "$StateDir\quarantine"
@@ -42,10 +49,12 @@ if (-not (Test-Path $GuardianPath)) { $GuardianPath = "$StateDir\SentinelGuardia
 $ManifestFile = "$StateDir\manifest.json"
 $StopFlagFile = "$StateDir\graceful_stop.token"
 $CanaryDir    = "$env:APPDATA\SecuritySentinel_Canary"
-$DocCanary    = Join-Path ([Environment]::GetFolderPath('MyDocuments')) "Crypto_Recovery_Phrase_Decoy.txt"
+$MyDocsDir    = [Environment]::GetFolderPath('MyDocuments')
+if ([string]::IsNullOrWhiteSpace($MyDocsDir)) { $MyDocsDir = "$env:USERPROFILE\Documents" }
+$DocCanary    = Join-Path $MyDocsDir "Crypto_Recovery_Phrase_Decoy.txt"
 
 @($StateDir, "$StateDir\logs", $QuarDir, $CanaryDir) | ForEach-Object {
-    if (-not (Test-Path $_)) { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
+    if ($_ -and (-not (Test-Path $_))) { New-Item -ItemType Directory -Path $_ -Force -ErrorAction SilentlyContinue | Out-Null }
 }
 
 # ---------------------------------------------------------------------
@@ -351,30 +360,83 @@ if ((-not (Test-Path $ConfigFile)) -and (Test-Path $PortableCfg)) {
     Copy-Item -Path $PortableCfg -Destination $ConfigFile -Force
 }
 
+function New-SentinelRegistryAclObject {
+    $acl = New-Object System.Security.AccessControl.RegistrySecurity
+    # A2: Disable inheritance, remove inherited rules, and grant ONLY SYSTEM and Administrators FullControl.
+    # Do NOT add a Deny rule for BUILTIN\Users because elevated Administrators are also members of Users!
+    $acl.SetAccessRuleProtection($true, $false)
+    $sysSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $admSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $inh    = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $prop   = [System.Security.AccessControl.PropagationFlags]::None
+
+    $sysRule = New-Object System.Security.AccessControl.RegistryAccessRule($sysSid, [System.Security.AccessControl.RegistryRights]::FullControl, $inh, $prop, [System.Security.AccessControl.AccessControlType]::Allow)
+    $admRule = New-Object System.Security.AccessControl.RegistryAccessRule($admSid, [System.Security.AccessControl.RegistryRights]::FullControl, $inh, $prop, [System.Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($sysRule)
+    $acl.AddAccessRule($admRule)
+    return $acl
+}
+
+function Set-SentinelRegistryAcl {
+    param([string]$RegistryPath = "HKLM:\SOFTWARE\SecuritySentinel")
+    if (-not (Test-Path $RegistryPath)) { return $false }
+    try {
+        $acl = New-SentinelRegistryAclObject
+        Set-Acl -Path $RegistryPath -AclObject $acl -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-InstallationSecretBytes {
     # Zero-Trust: Purge any legacy secret from HKCU immediately
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
 
-    # 1. Read exclusively from HKLM InstallSecret (Admin/SYSTEM ACL protected)
+    # 1. Read from HKLM InstallSecret (SYSTEM + Administrators ACL protected)
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
         $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
         if ($b64) {
-            try { return [Convert]::FromBase64String($b64) } catch {}
+            try {
+                $bytes = [Convert]::FromBase64String($b64)
+                if ($bytes -and $bytes.Length -ge 16) { return $bytes }
+            } catch {}
         }
     }
-    # 2. Ephemeral 256-bit CSPRNG secret in memory (never written to HKCU!)
+
+    # 2. A3: Unified DPAPI-protected 256-bit CSPRNG vault file ($StateDir\vault.sec) for user-mode consistency
+    $vaultFile = Join-Path $StateDir "vault.sec"
+    if (Test-Path $vaultFile) {
+        try {
+            $encB64 = (Get-Content $vaultFile -Raw -Encoding UTF8 -ErrorAction Stop).Trim()
+            $encBytes = [Convert]::FromBase64String($encB64)
+            $decBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($encBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            if ($decBytes -and $decBytes.Length -ge 16) { return $decBytes }
+        } catch {}
+    }
+
+    # 3. Generate and persist 256-bit CSPRNG secret in DPAPI vault.sec (never static constant!)
     $rngBytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $rng.GetBytes($rngBytes)
+    $rng.Dispose()
+    try {
+        if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+        $encBytes = [System.Security.Cryptography.ProtectedData]::Protect($rngBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        [System.IO.File]::WriteAllText($vaultFile, [Convert]::ToBase64String($encBytes), [System.Text.Encoding]::UTF8)
+    } catch {}
     return $rngBytes
 }
 
+function Get-SentinelSecret {
+    return (Get-InstallationSecretBytes)
+}
+
 $script:SentinelEntropyBytes = Get-InstallationSecretBytes
-$script:LegacyEntropyBytes   = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 function Protect-DpapiString([string]$plainText) {
-    if ([string]::IsNullOrWhiteSpace($plainText)) { return "" }
+    if ([string]::IsNullOrWhiteSpace($plainText) -or (-not $script:SentinelEntropyBytes)) { return "" }
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($plainText)
         $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
@@ -383,15 +445,12 @@ function Protect-DpapiString([string]$plainText) {
 }
 
 function Unprotect-DpapiString([string]$cipherBase64) {
-    if ([string]::IsNullOrWhiteSpace($cipherBase64)) { return "" }
+    if ([string]::IsNullOrWhiteSpace($cipherBase64) -or (-not $script:SentinelEntropyBytes)) { return "" }
     try {
         $enc = [Convert]::FromBase64String($cipherBase64)
-        foreach ($ent in @($script:SentinelEntropyBytes, $script:LegacyEntropyBytes, $null)) {
-            try {
-                $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $ent, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-                return [System.Text.Encoding]::UTF8.GetString($dec)
-            } catch {}
-        }
+        # A3: Strictly require the unified per-install CSPRNG secret (no static public constant fallback!)
+        $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        return [System.Text.Encoding]::UTF8.GetString($dec)
     } catch {}
     return ""
 }
@@ -420,6 +479,7 @@ function New-AuthenticatedStopToken {
 function Test-AuthenticatedStopToken {
     param([string]$ExpectedWatchdogPid = "$PID")
     if (-not (Test-Path $StopFlagFile)) { return $false }
+    if (-not $script:SentinelEntropyBytes) { return $false }
     try {
         $raw = (Get-Content $StopFlagFile -Raw -Encoding UTF8).Trim()
         $enc = [Convert]::FromBase64String($raw)
@@ -541,27 +601,154 @@ function Get-ActiveVtApiKey {
 $script:Config = Load-SentinelConfig
 
 # ---------------------------------------------------------------------
-# LOGGING ENGINE
+# C1: TAMPER-EVIDENT LOGGING ENGINE (Windows Event Log Primary + HMAC-SHA256 Chain)
 # ---------------------------------------------------------------------
+function Compute-LogLineHmac {
+    param([string]$PrevHmac, [string]$CoreLine)
+    $keyBytes = if ($script:SentinelEntropyBytes -and $script:SentinelEntropyBytes.Length -ge 16) {
+        $script:SentinelEntropyBytes
+    } else {
+        [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_LOG_HMAC_DEFAULT_KEY_V8")
+    }
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$keyBytes)
+    $hashBytes = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$PrevHmac|$CoreLine"))
+    $hmac.Dispose()
+    return ([BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16))
+}
+
+function Write-SentinelEventLog {
+    param([string]$Message, [string]$Level = "INFO")
+    try {
+        $entryType = switch ($Level) {
+            "CRITICAL" { [System.Diagnostics.EventLogEntryType]::Error }
+            "ALERT"    { [System.Diagnostics.EventLogEntryType]::Warning }
+            "TIER3"    { [System.Diagnostics.EventLogEntryType]::Warning }
+            "WARN"     { [System.Diagnostics.EventLogEntryType]::Warning }
+            default    { [System.Diagnostics.EventLogEntryType]::Information }
+        }
+        $eventId = switch ($Level) {
+            "CRITICAL" { 4001 }
+            "ALERT"    { 4002 }
+            "TIER3"    { 4003 }
+            "WARN"     { 4004 }
+            default    { 4000 }
+        }
+        if ([System.Diagnostics.EventLog]::SourceExists("SecuritySentinel")) {
+            Write-EventLog -LogName "Application" -Source "SecuritySentinel" -EventId $eventId -EntryType $entryType -Message "[$Level] $Message" -ErrorAction Stop
+        } else {
+            Write-EventLog -LogName "Application" -Source "Windows PowerShell" -EventId 800 -EntryType $entryType -Message "[SecuritySentinel][$Level] $Message" -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)][string]$Message,
         [ValidateSet("INFO", "WARN", "ALERT", "CRITICAL", "SCAN", "TIER2", "TIER3", "FORENSIC")][string]$Level = "INFO"
     )
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    $line = "[$ts] [$Level] $Message"
+    $coreLine = "[$ts] [$Level] $Message"
+    Write-SentinelEventLog -Message $Message -Level $Level
+
     try {
-        Add-Content -Path $LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
-    } catch {}
+        $prevHmac = "0000000000000000"
+        if (Test-Path $LogFile) {
+            $lastLn = Get-Content -Path $LogFile -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($lastLn -and $lastLn -match "\[HMAC:([0-9A-Fa-f]{16})\]$") {
+                $prevHmac = $Matches[1].ToUpper()
+            }
+        }
+        $newHmac = Compute-LogLineHmac -PrevHmac $prevHmac -CoreLine $coreLine
+        $fullLine = "$coreLine [HMAC:$newHmac]"
+        Add-Content -Path $LogFile -Value $fullLine -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {
+        $fullLine = $coreLine
+    }
     if (-not $LibraryOnly) {
-        Write-Output $line
+        Write-Output $coreLine
     }
 }
 
+function Test-SentinelLogIntegrity {
+    param([string]$Path = $LogFile)
+    if (-not (Test-Path $Path)) {
+        return @{ Valid = $true; TotalLines = 0; TamperedLine = 0; Reason = "LogFileNotPresent" }
+    }
+    $lines = @(Get-Content -Path $Path -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $prevHmac = "0000000000000000"
+    $lineIdx = 0
+    foreach ($ln in $lines) {
+        $lineIdx++
+        if ($ln -notmatch "^(.*)\s+\[HMAC:([0-9A-Fa-f]{16})\]$") {
+            return @{ Valid = $false; TotalLines = $lines.Count; TamperedLine = $lineIdx; Reason = "MissingHmacTag" }
+        }
+        $corePart = $Matches[1]
+        $claimedHmac = $Matches[2].ToUpper()
+        $expectedHmac = Compute-LogLineHmac -PrevHmac $prevHmac -CoreLine $corePart
+        if ($claimedHmac -ne $expectedHmac) {
+            return @{ Valid = $false; TotalLines = $lines.Count; TamperedLine = $lineIdx; Reason = "HmacMismatchAtLine_$lineIdx" }
+        }
+        $prevHmac = $claimedHmac
+    }
+    return @{ Valid = $true; TotalLines = $lines.Count; TamperedLine = 0; Reason = "VerifiedChain" }
+}
+
 # ---------------------------------------------------------------------
-# PILLAR 3: EXTERNAL CODE INTEGRITY MANIFEST & FAIL-CLOSED TRUST ANCHOR
+# PILLAR 3 (B1 & B5): EXTERNAL CODE INTEGRITY MANIFEST & FAIL-CLOSED TRUST ANCHOR
 # ---------------------------------------------------------------------
 $script:SelfPath = $MyInvocation.MyCommand.Path
+$script:AuthorizedCoreScripts = @(
+    "SentinelWatchdog.ps1",
+    "SentinelGuardian.ps1",
+    "SentinelDashboard.ps1",
+    "SentinelTray.ps1",
+    "Start-Shield.ps1",
+    "Stop-Shield.ps1",
+    "Sign-Scripts.ps1",
+    "Install.ps1",
+    "Uninstall.ps1",
+    "Invoke-RedTeamAudit.ps1"
+)
+
+function Get-TrustedCertThumbprint {
+    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regAnchor) {
+        $tp = (Get-ItemProperty -Path $regAnchor -Name "TrustedCertThumbprint" -ErrorAction SilentlyContinue).TrustedCertThumbprint
+        if ($tp) { return "$tp".Trim().ToUpper() }
+    }
+    if (Test-Path $ManifestFile) {
+        try {
+            $mObj = Get-Content $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($mObj -and $mObj.TrustedCertThumbprint) { return "$($mObj.TrustedCertThumbprint)".Trim().ToUpper() }
+        } catch {}
+    }
+    foreach ($dir in @($SentinelDir, $PSScriptRoot, $StateDir)) {
+        if ($dir) {
+            $tpFile = Join-Path $dir "trusted_cert.thumbprint"
+            if (Test-Path $tpFile) {
+                $raw = (Get-Content $tpFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+                if ($raw) { return $raw.Trim().ToUpper() }
+            }
+        }
+    }
+    return ""
+}
+
+function Test-SentinelScriptSignature {
+    param([string]$ScriptPath)
+    if (-not (Test-Path $ScriptPath -PathType Leaf)) { return $false }
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $ScriptPath -ErrorAction Stop
+        if (-not $sig -or $sig.Status -ne 'Valid' -or -not $sig.SignerCertificate) { return $false }
+        $expectedTp = Get-TrustedCertThumbprint
+        if ($expectedTp -and ($sig.SignerCertificate.Thumbprint.ToUpper() -ne $expectedTp)) {
+            return $false
+        }
+        return ($sig.SignerCertificate.Subject -match "Security Sentinel Ultra Code Signing")
+    } catch {
+        return $false
+    }
+}
 
 function Get-TrustedScriptHashes {
     $hashes = @{}
@@ -570,7 +757,7 @@ function Get-TrustedScriptHashes {
     if (Test-Path $regAnchor) {
         $props = Get-ItemProperty -Path $regAnchor -ErrorAction SilentlyContinue
         if ($props) {
-            foreach ($sName in @("SentinelWatchdog.ps1", "SentinelGuardian.ps1", "SentinelDashboard.ps1", "Sign-Scripts.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")) {
+            foreach ($sName in $script:AuthorizedCoreScripts) {
                 if ($props.$sName -and (-not $hashes.ContainsKey($sName))) {
                     $hashes[$sName] = "$($props.$sName)"
                 }
@@ -597,7 +784,7 @@ function Get-TrustedScriptHashes {
 
 function Initialize-CodeIntegrityTrustAnchor {
     $hashes = [ordered]@{}
-    foreach ($sName in @("SentinelWatchdog.ps1", "SentinelGuardian.ps1", "SentinelDashboard.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1")) {
+    foreach ($sName in $script:AuthorizedCoreScripts) {
         $p = if ($LibraryOnly -and $PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot $sName))) {
             Join-Path $PSScriptRoot $sName
         } else {
@@ -612,15 +799,18 @@ function Initialize-CodeIntegrityTrustAnchor {
     }
     $sealed = Protect-DpapiString ($hashes | ConvertTo-Json -Compress)
     $manifestObj = [ordered]@{
-        Version      = "7.0"
-        UpdatedAt    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        SealedHashes = $sealed
+        Version               = "8.0"
+        UpdatedAt             = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        TrustedCertThumbprint = (Get-TrustedCertThumbprint)
+        SealedHashes          = $sealed
     }
     [System.IO.File]::WriteAllText($ManifestFile, ($manifestObj | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
 
     # Zero-Trust: Do not mirror hashes into HKCU; purge legacy key if exists
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
-    return $hashes
+    $retTable = @{}
+    foreach ($k in $hashes.Keys) { $retTable[$k] = $hashes[$k] }
+    return $retTable
 }
 
 # Verify if a PowerShell command line is executing one of our own Trust-Anchor-Verified Sentinel scripts
@@ -641,8 +831,7 @@ function Test-IsVerifiedSentinelScript {
 
     $invokedScriptPath = $Matches[1]
     $leafName = Split-Path $invokedScriptPath -Leaf
-    $authorizedScripts = @("SentinelDashboard.ps1", "SentinelWatchdog.ps1", "SentinelGuardian.ps1", "Install.ps1", "Uninstall.ps1", "Invoke-RedTeamAudit.ps1", "Sign-Scripts.ps1")
-    if ($authorizedScripts -notcontains $leafName) {
+    if ($script:AuthorizedCoreScripts -notcontains $leafName) {
         return $false
     }
 
@@ -656,7 +845,7 @@ function Test-IsVerifiedSentinelScript {
     }
 
     # 4. Must reside in authorized installation or repo directory
-    $authDirs = @($SentinelDir.TrimEnd('\'), $StateDir.TrimEnd('\'))
+    $authDirs = @($SentinelDir.TrimEnd('\'), $StateDir.TrimEnd('\'), "$env:ProgramFiles\SecuritySentinel".TrimEnd('\'))
     if ($PSScriptRoot) { $authDirs += $PSScriptRoot.TrimEnd('\') }
     $parentDir = (Split-Path $realPath -Parent).TrimEnd('\')
 
@@ -732,7 +921,7 @@ function Ensure-GuardianTwin {
         $gPidRaw = (Get-Content $GuardianPidF -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($gPidRaw -and ($gPidRaw.Trim() -match "^\d+$")) {
             $gPidInt = [int]$gPidRaw.Trim()
-            $gProc = Get-Process -Id $gPidInt -ErrorAction SilentlyContinue
+            $gProc = Get-Process -Id ([int]$gPidInt) -ErrorAction SilentlyContinue
             if ($gProc -and $gProc.ProcessName -match "^(powershell|pwsh)$") {
                 $guardianAlive = $true
                 $script:VerifiedGuardianPid = $gPidInt
@@ -741,7 +930,7 @@ function Ensure-GuardianTwin {
     }
 
     if (-not $guardianAlive) {
-        $gNew = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$GuardianPath`"" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+        $gNew = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$GuardianPath`"" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
         if ($gNew) {
             $script:VerifiedGuardianPid = [int]$gNew.Id
             Write-Log "Guardian Twin Self-Defense active (Guardian PID: $($gNew.Id) watching Watchdog PID: $PID)." "TIER3"
@@ -1461,8 +1650,9 @@ function Get-PersistenceSnapshot {
 
     # Vector 25: Non-Microsoft Scheduled Tasks
     try {
+        $sentinelTasks = @("SecuritySentinelWatchdog", "SecuritySentinelGuardian", "SecuritySentinelTray", "SecuritySentinelAutoResume")
         Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
-            $_.TaskPath -notmatch "^\\Microsoft\\" -and $_.TaskName -ne "SecuritySentinelWatchdog"
+            $_.TaskPath -notmatch "^\\Microsoft\\" -and ($sentinelTasks -notcontains $_.TaskName)
         } | ForEach-Object {
             $snap["Task_$($_.TaskPath)$($_.TaskName)"] = "$($_.State)"
         }
@@ -1544,6 +1734,69 @@ function Parse-Event4663Xml {
     return $info
 }
 
+# C3: Parse Security Event ID 4688 & Sysmon Event ID 1 XML for Short-Lived Process Detection
+function Parse-ProcessCreationEventXml {
+    param([string]$EventXmlString)
+    $info = @{
+        ProcessId         = 0
+        ExecutablePath    = ""
+        Name              = ""
+        CommandLine       = ""
+        ParentProcessId   = 0
+        ParentProcessName = ""
+        CreationDate      = ""
+    }
+    try {
+        [xml]$xml = $EventXmlString
+        if ($xml.Event.System.TimeCreated.SystemTime) {
+            $info.CreationDate = "$($xml.Event.System.TimeCreated.SystemTime)"
+        }
+        foreach ($d in $xml.Event.EventData.Data) {
+            $val = "$($d.'#text')".Trim()
+            switch ($d.Name) {
+                # Security Event 4688 fields
+                "NewProcessId" {
+                    if ($val -match "^0x[0-9a-fA-F]+$") { $info.ProcessId = [Convert]::ToInt32($val, 16) }
+                    elseif ($val -match "^\d+$")        { $info.ProcessId = [int]$val }
+                }
+                "NewProcessName" {
+                    $info.ExecutablePath = $val
+                    $info.Name = Split-Path $val -Leaf
+                }
+                "ProcessId" {
+                    # In 4688 ProcessId is Creator/Parent; in Sysmon Event 1 ProcessId is the new process
+                    $parsedInt = 0
+                    if ($val -match "^0x[0-9a-fA-F]+$") { $parsedInt = [Convert]::ToInt32($val, 16) }
+                    elseif ($val -match "^\d+$")        { $parsedInt = [int]$val }
+                    if ($xml.Event.System.EventID -eq "1") {
+                        $info.ProcessId = $parsedInt
+                    } elseif ($info.ParentProcessId -eq 0) {
+                        $info.ParentProcessId = $parsedInt
+                    }
+                }
+                "CreatorProcessId" {
+                    if ($val -match "^0x[0-9a-fA-F]+$") { $info.ParentProcessId = [Convert]::ToInt32($val, 16) }
+                    elseif ($val -match "^\d+$")        { $info.ParentProcessId = [int]$val }
+                }
+                "ParentProcessName" { $info.ParentProcessName = $val }
+                "CommandLine"       { $info.CommandLine = $val }
+                # Sysmon Event ID 1 fields
+                "Image" {
+                    $info.ExecutablePath = $val
+                    $info.Name = Split-Path $val -Leaf
+                }
+                "ParentProcessId" {
+                    if ($val -match "^0x[0-9a-fA-F]+$") { $info.ParentProcessId = [Convert]::ToInt32($val, 16) }
+                    elseif ($val -match "^\d+$")        { $info.ParentProcessId = [int]$val }
+                }
+                "ParentImage" { $info.ParentProcessName = $val }
+                "UtcTime"     { if (-not $info.CreationDate) { $info.CreationDate = $val } }
+            }
+        }
+    } catch {}
+    return $info
+}
+
 # ---------------------------------------------------------------------
 # 5. TIER 2, 3, 4: COMPOSITE PID|CREATIONDATE TRACKING & UNIFIED RULES
 # ---------------------------------------------------------------------
@@ -1580,10 +1833,13 @@ function Inspect-SingleProcess {
         $parentName = "$($procMap[$pPid].Name)".ToLower()
         $parentExePath = "$($procMap[$pPid].ExecutablePath)"
     } else {
-        $parentProc = Get-Process -Id $pPid -ErrorAction SilentlyContinue
+        $parentProc = Get-Process -Id ([int]$pPid) -ErrorAction SilentlyContinue
         if ($parentProc) { 
             $parentName = "$($parentProc.ProcessName).exe".ToLower()
             try { $parentExePath = $parentProc.Path } catch {}
+        } elseif ($p.PSObject.Properties["ParentExecutablePath"] -and $p.ParentExecutablePath) {
+            $parentExePath = "$($p.ParentExecutablePath)"
+            $parentName = (Split-Path $parentExePath -Leaf).ToLower()
         }
     }
 
@@ -1598,12 +1854,13 @@ function Inspect-SingleProcess {
     $isScriptParent      = ($parentName -match "^(wscript|cscript|mshta|rundll32|regsvr32)\.exe$")
     $isHighRiskParent    = ($isBrowserOrLauncher -or $isOfficeParent -or $isPdfParent -or $isArchiveParent -or $isScriptParent)
 
-    # Anti-Spoofing: Parent must NOT reside in Temp/Public/Downloads; must reside in standard program directories OR be signed!
+    # A4 Anti-Spoofing: Parent must NOT reside in user-writable AppData/Temp/Public/Downloads unless validly Authenticode-signed!
+    # Only Program Files / Windows are trusted by directory path alone.
     $isWorkOrGameDev = $false
     if ($parentName -match $script:WorkAndGamingParentsRegex) {
         $isParentSuspicious = ($parentExePath -and ($parentExePath -match "\\AppData\\Local\\Temp\\|\\Users\\Public\\|\\Downloads\\"))
         if (-not $isParentSuspicious) {
-            $isStandardParentDir = ($parentExePath -and ($parentExePath -match "(?i)^[a-z]:\\(Program Files|Program Files \(x86\)|Windows|Users\\[^\\]+\\AppData\\Local\\Programs)\\"))
+            $isStandardParentDir = ($parentExePath -and ($parentExePath -match "(?i)^[a-z]:\\(Program Files|Program Files \(x86\)|Windows)\\"))
             if ($isStandardParentDir) {
                 $isWorkOrGameDev = $true
             } elseif ($parentExePath -and (Test-Path $parentExePath -PathType Leaf)) {
@@ -1870,13 +2127,11 @@ $browserEventAction = {
                 if ($moved) {
                     $meta = "QuarantinedFileName: $itemName`r`nOriginalPath: $itemPath`r`nSHA256: $sha256`r`nEntropy: $entropy`r`nC2Hits: $c2Count`r`nTimestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`nReason: High-Confidence Browser Malware Quarantined"
                     [System.IO.File]::WriteAllText("$destPath.meta.txt", $meta, [System.Text.Encoding]::UTF8)
-                    $logLine = "[$ts] [CRITICAL] Browser Malware Quarantined! File '$itemName' (SHA256: $sha256, Entropy: $entropy, C2Hits: $c2Count) -> '$destPath'."
-                    Add-Content -Path (Join-Path $sentDir "logs\sentinel.log") -Value $logLine -Encoding UTF8 -ErrorAction SilentlyContinue
+                    Write-Log "Browser Malware Quarantined! File '$itemName' (SHA256: $sha256, Entropy: $entropy, C2Hits: $c2Count) -> '$destPath'." "CRITICAL"
                 }
             } else {
                 # Safe-Mode: Do not break legitimate browser extensions/components; log warning for visibility
-                $logLine = "[$ts] [WARN] Browser Safe-Mode: Unsigned module '$itemName' created in User Data (SHA256: $sha256, Entropy: $entropy, C2: 0). Monitored without quarantine."
-                Add-Content -Path (Join-Path $sentDir "logs\sentinel.log") -Value $logLine -Encoding UTF8 -ErrorAction SilentlyContinue
+                Write-Log "Browser Safe-Mode: Unsigned module '$itemName' created in User Data (SHA256: $sha256, Entropy: $entropy, C2: 0). Monitored without quarantine." "WARN"
             }
         }
     }
@@ -1906,8 +2161,6 @@ foreach ($bPath in $browserUserDataPaths) {
 $canaryAction = {
     $cFile   = $Event.SourceEventArgs.FullPath
     $cType   = $Event.SourceEventArgs.ChangeType
-    $sentDir = $Event.MessageData.StateDir
-    $ts      = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
     $cLeaf = Split-Path $cFile -Leaf
     $validCanaries = @(
@@ -1916,8 +2169,7 @@ $canaryAction = {
     )
     if ($validCanaries -notcontains $cLeaf) { return }
 
-    $logLine = "[$ts] [CRITICAL] Honeypot Decoy Triggered! File '$cFile' was $cType. Possible Infostealer / Ransomware activity!"
-    Add-Content -Path (Join-Path $sentDir "logs\sentinel.log") -Value $logLine -Encoding UTF8 -ErrorAction SilentlyContinue
+    Write-Log "Honeypot Decoy Triggered! File '$cFile' was $cType. Possible Infostealer / Ransomware activity!" "CRITICAL"
 }
 
 $canaryDirsToWatch = @($CanaryDir)
@@ -2015,6 +2267,39 @@ function Inspect-DeepTelemetryEvents {
             }
         }
     } catch {}
+
+    # 3. C3: Short-Lived Process Creation Events (Security Event ID 4688 & Sysmon Event ID 1)
+    #    Catches rapid sub-second processes that exit before WMI polling completes!
+    foreach ($logSpec in @(
+        @{ LogName = 'Security'; Id = 4688 },
+        @{ LogName = 'Microsoft-Windows-Sysmon/Operational'; Id = 1 }
+    )) {
+        try {
+            $procEvents = Get-WinEvent -FilterHashtable @{
+                LogName   = $logSpec.LogName
+                Id        = $logSpec.Id
+                StartTime = $since
+            } -MaxEvents 40 -ErrorAction SilentlyContinue
+
+            if ($procEvents) {
+                foreach ($pev in $procEvents) {
+                    $pInfo = Parse-ProcessCreationEventXml -EventXmlString $pev.ToXml()
+                    if ($pInfo.ProcessId -gt 0 -and $pInfo.ProcessId -ne $PID -and $pInfo.ProcessId -ne $script:VerifiedGuardianPid) {
+                        $synthProc = [PSCustomObject]@{
+                            ProcessId            = $pInfo.ProcessId
+                            Name                 = $pInfo.Name
+                            ExecutablePath       = $pInfo.ExecutablePath
+                            CommandLine          = $pInfo.CommandLine
+                            ParentProcessId      = $pInfo.ParentProcessId
+                            ParentExecutablePath = $pInfo.ParentProcessName
+                            CreationDate         = if ($pInfo.CreationDate) { $pInfo.CreationDate } else { "$($pev.TimeCreated)" }
+                        }
+                        [void](Inspect-SingleProcess -p $synthProc -procMap $null)
+                    }
+                }
+            }
+        } catch {}
+    }
 }
 
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
@@ -2125,7 +2410,7 @@ function Inspect-ProcessModules {
 }
 
 # 7. Main Continuous Monitoring Loop (Checks stop signal every 500ms for instant graceful shutdown without PROCESS_TERMINATE)
-Write-Log "Sentinel Watchdog Ultra v7.0 enters live monitoring loop (Work & Gaming Safe-Mode Active)."
+Write-Log "Sentinel Watchdog Ultra v8.0 enters live monitoring loop (Work & Gaming Safe-Mode Active)."
 $loopCount = 0
 $lastDeepSweep = [DateTime]::UtcNow
 
@@ -2133,6 +2418,7 @@ while ($true) {
     for ($w = 0; $w -lt 4; $w++) {
         Start-Sleep -Milliseconds 500
         if (Test-AuthenticatedStopToken) {
+            Write-Log "Authenticated Stop Token verified. Watchdog (PID: $PID) performing graceful self-shutdown." "WARN"
             Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
             exit 0
         }
@@ -2196,42 +2482,7 @@ while ($true) {
     }
 
     if ($loopCount % 900 -eq 0) {
-        Write-Log "Heartbeat: v7.0 Work & Gaming Safe-Mode Engines healthy ($($watchers.Count) watchers, $($knownProcs.Count) active PID|Time keys, $($baseline.Count) persistence/service vectors, $($script:VerifiedModules.Count) DLLs cached)." "INFO"
+        Write-Log "Heartbeat: v8.0 Work & Gaming Safe-Mode Engines healthy ($($watchers.Count) watchers, $($knownProcs.Count) active PID|Time keys, $($baseline.Count) persistence/service vectors, $($script:VerifiedModules.Count) DLLs cached)." "INFO"
         $script:Config = Load-SentinelConfig
     }
 }
-
-# SIG # Begin signature block
-# MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAHzYSfW6eyjAE7
-# 883NHtQ2TzzGnx9BG5YhZ0dFue/ETaCCAzIwggMuMIICFqADAgECAhBqicxAtgYy
-# tEDV87OXYXwsMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
-# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkxODA2NDBaFw0zMTEx
-# MDkxODE2NDBaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
-# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMNKKvtK
-# ERrpKZl/ygPwjprcar+6Xk/3xKwms9K7GDTSH8EYVjwFvMsNGB8+On0f31+3hmyt
-# KZzePEl5panG4eomaJwGl5qLzD2qyJVAtpgRKh+fiUgjFgm+FOm46u74WMC/Jhr2
-# UZe+h6PpO7eoAizbrVRHPaHIOSfIMxnQFVtkkV66T0O5ELGaqTsLZbeQRZsvf6pl
-# mIRLQ7nDIzQ6HqRuaWYfU/GNB8/uDhymxuRyLVV6y6pJ/lO2plVgHwC1JHIT7M+S
-# t6Fx8wOkUB9McT6P/T4uXHP56PufSxPC7Q4IgDBQ4sQr6NKqtxzVeZ8LBeZW9dsF
-# /E1ggkQ3GpNEDmECAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMDMB0GA1UdDgQWBBTzQylDY2rNT15+NYtrGro9m44IMjANBgkqhkiG
-# 9w0BAQsFAAOCAQEASGAB2FcY0MsNMQsmt1MEmkmsNWWM15Bf3/gojZQeA84NS39J
-# Q3AvtZsrUFq7czi6dm0Oh5GtmEhBBaXxdQeZc48SviS1ZkH+ydm4wFNDz0htXqem
-# K5iqgz9JWlYbO0Q1SpCwnrL2lqtXUTqnq1K83NVlyEfMJy1N/pve+DlOLEBjvPvr
-# PJDNfUZ79skHaztddUvFUfRFIOaMr0sop2XozdqDsD3Au4im941zJTleYk7m+0Qx
-# V0WFPnXMN88dI7JkFgmgmoT53b362u5EU9KHRnwLNjrGIb4+NpAH5QtH7Xl1hqde
-# Hxvq+WiRbpJEMEiPyUN71mzSsOfIzKk16U4MIjGCAfUwggHxAgEBMEMwLzEtMCsG
-# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhBqicxA
-# tgYytEDV87OXYXwsMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
-# oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIGV2en6I1YrWVHPX8im7
-# f3F+gSCtzzpO6qeyyC5ZALKxMA0GCSqGSIb3DQEBAQUABIIBALo6f34VtN6xt6k+
-# R23bUB65yi8VVs5pyYYN5WlPexeruMfj9UPH/SOGjORiO4Ewb0Adra62Lc6ppmDQ
-# recs0Vl3fkwUG++cwOaqeTZuaiOQDom7OZccxR+rxjpqBwfr/ihfLQmyI2WjTimq
-# KMiK1mHPmND9Sps02NGDpNg/voFxV5ZP3v5CPnHrKxdP8XQOUEv1C7jRmPVUE6fS
-# hwmCjmRvrxHaa9fU9fun+KMZUy6tLK+mbrJ68xz4DmF0rh5XZG5yTZI0rNRlxU7G
-# KgD5FMQ2g99S/TiKG0xBTW1NEoVsT1HFbX12Zym5NwX6WJZwqcwwPKe5Fbu7JIac
-# aLtQMIU=
-# SIG # End signature block

@@ -1,0 +1,57 @@
+name: Security Sentinel Windows CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  windows-edr-verification:
+    name: Windows Server / Windows 11 Automated Test & Red-Team Suite
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify PowerShell Syntax Across All Scripts
+        shell: powershell
+        run: |
+          $errors = 0
+          Get-ChildItem -Path .\core, .\tests -Filter "*.ps1" -Recurse | ForEach-Object {
+              $tokens = $null
+              $parseErrors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+              if ($parseErrors -and $parseErrors.Count -gt 0) {
+                  Write-Host "[FAIL] Syntax error in $($_.FullName):" -ForegroundColor Red
+                  $parseErrors | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+                  $errors++
+              } else {
+                  Write-Host "[OK] Syntax verified: $($_.Name)" -ForegroundColor Green
+              }
+          }
+          if ($errors -gt 0) { exit 1 }
+
+      - name: Run Automated Unit Test Runner (Run-Tests.ps1)
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+
+      - name: Run Live E2E Red-Team & Safe-Mode Audit (Invoke-RedTeamAudit.ps1)
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\core\Invoke-RedTeamAudit.ps1
+
+      - name: Run PSScriptAnalyzer Static Analysis
+        shell: powershell
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction SilentlyContinue
+          if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
+              $findings = Invoke-ScriptAnalyzer -Path .\core -Severity Error -Recurse
+              if ($findings) {
+                  $findings | Format-Table -AutoSize
+                  exit 1
+              }
+              Write-Host "[OK] Zero PSScriptAnalyzer Error-level findings in .\core" -ForegroundColor Green
+          }

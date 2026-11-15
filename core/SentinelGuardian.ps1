@@ -1,9 +1,9 @@
 # =====================================================================
-# Security Sentinel Ultra v7.0 - Guardian Twin (Fail-Closed Hardened)
+# Security Sentinel Ultra v8.0 - Guardian Twin (Fail-Closed Hardened)
 # 1. Real Kernel DACL Writeback with OWNER RIGHTS (S-1-3-4) Restriction
 #    (Blocks WRITE_DAC & PROCESS_TERMINATE even from same-user processes)
-# 2. Per-Install 256-bit CSPRNG Secret + PID-Bound Stop-Token Verification
-# 3. Fail-Closed External Trust Anchor (Zero disk-hash fallback!)
+# 2. Unified CSPRNG Secret (HKLM / DPAPI Vault) + PID-Bound Stop-Token
+# 3. Fail-Closed External Trust Anchor (Zero disk-hash or static fallback!)
 # =====================================================================
 param(
     [switch]$LibraryOnly
@@ -11,14 +11,21 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
-$SentinelDir  = if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1")) -and ($PSScriptRoot -match "Program Files")) {
-    $PSScriptRoot
+$ProgDir      = "$env:ProgramFiles\SecuritySentinel"
+$StateDir     = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
+    $env:SENTINEL_STATE_DIR
 } else {
     "$env:LOCALAPPDATA\SecuritySentinel"
 }
-$StateDir     = "$env:LOCALAPPDATA\SecuritySentinel"
+$SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
+    $ProgDir
+} elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
+    $PSScriptRoot
+} else {
+    $StateDir
+}
+
 $WatchdogPath = Join-Path $SentinelDir "SentinelWatchdog.ps1"
-if (-not (Test-Path $WatchdogPath)) { $WatchdogPath = "$StateDir\SentinelWatchdog.ps1" }
 $ConfigFile   = "$StateDir\config.json"
 $LogFile      = "$StateDir\logs\sentinel.log"
 $WatchdogPidF = "$StateDir\sentinel.pid"
@@ -88,32 +95,39 @@ try {
     }
 } catch {}
 
+# A3: Unified Secret Loader (HKLM first, then DPAPI vault.sec; zero static public constant!)
 function Get-GuardianInstallationSecretBytes {
-    # Purge legacy HKCU secret if present
     Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
     $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
     if (Test-Path $regPath) {
         $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
         if ($b64) {
-            try { return [Convert]::FromBase64String($b64) } catch {}
+            try {
+                $bytes = [Convert]::FromBase64String($b64)
+                if ($bytes -and $bytes.Length -ge 16) { return $bytes }
+            } catch {}
         }
     }
-    return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+    $vaultFile = Join-Path $StateDir "vault.sec"
+    if (Test-Path $vaultFile) {
+        try {
+            $encB64 = (Get-Content $vaultFile -Raw -Encoding UTF8 -ErrorAction Stop).Trim()
+            $encBytes = [Convert]::FromBase64String($encB64)
+            $decBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($encBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            if ($decBytes -and $decBytes.Length -ge 16) { return $decBytes }
+        } catch {}
+    }
+    return $null
 }
 
 $script:SentinelEntropyBytes = Get-GuardianInstallationSecretBytes
-$script:LegacyEntropyBytes   = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 function Unprotect-DpapiString([string]$cipherBase64) {
-    if ([string]::IsNullOrWhiteSpace($cipherBase64)) { return "" }
+    if ([string]::IsNullOrWhiteSpace($cipherBase64) -or (-not $script:SentinelEntropyBytes)) { return "" }
     try {
         $enc = [Convert]::FromBase64String($cipherBase64)
-        foreach ($ent in @($script:SentinelEntropyBytes, $script:LegacyEntropyBytes, $null)) {
-            try {
-                $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $ent, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-                return [System.Text.Encoding]::UTF8.GetString($dec)
-            } catch {}
-        }
+        $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        return [System.Text.Encoding]::UTF8.GetString($dec)
     } catch {}
     return ""
 }
@@ -137,12 +151,15 @@ function Get-TrustedWatchdogHash {
             }
         } catch {}
     }
-    # Fail-Closed: Return empty string if Trust Anchor is missing or invalid!
     return ""
 }
 
+$script:LastKnownWatchdogPid = ""
+
 function Test-GuardianStopToken {
+    param([string]$ExpectedWatchdogPid = "")
     if (-not (Test-Path $StopFlagFile)) { return $false }
+    if (-not $script:SentinelEntropyBytes) { return $false }
     try {
         $raw = (Get-Content $StopFlagFile -Raw -Encoding UTF8).Trim()
         $enc = [Convert]::FromBase64String($raw)
@@ -165,12 +182,23 @@ function Test-GuardianStopToken {
             return $false
         }
 
-        if (Test-Path $WatchdogPidF) {
-            $expectedWdPid = (Get-Content $WatchdogPidF -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-            if ($expectedWdPid -match "^\d+$" -and ($tokenPid -ne $expectedWdPid)) {
-                Remove-Item $StopFlagFile -Force -ErrorAction SilentlyContinue
-                return $false
+        $targetPid = $ExpectedWatchdogPid
+        if (-not $targetPid -and (Test-Path $WatchdogPidF)) {
+            $rawPid = (Get-Content $WatchdogPidF -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($rawPid -and ($rawPid.Trim() -match "^\d+$")) {
+                $targetPid = $rawPid.Trim()
             }
+        }
+        if (-not $targetPid -and $script:LastKnownWatchdogPid) {
+            $targetPid = $script:LastKnownWatchdogPid
+        }
+        if (-not $targetPid) {
+            $targetPid = "$PID"
+        }
+
+        if ($tokenPid -ne $targetPid) {
+            Remove-Item $StopFlagFile -Force -ErrorAction SilentlyContinue
+            return $false
         }
         return $true
     } catch {
@@ -192,8 +220,35 @@ $PID | Out-File -FilePath $GuardianPidF -Encoding UTF8 -Force
 function Write-GuardianLog {
     param([string]$Message, [string]$Level = "CRITICAL")
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    $line = "[$ts] [$Level] $Message"
-    try { Add-Content -Path $LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+    $coreLine = "[$ts] [$Level] $Message"
+
+    # C1: Primary sink is Windows Event Log
+    try {
+        $source = if ([System.Diagnostics.EventLog]::SourceExists("SecuritySentinel")) { "SecuritySentinel" } else { "Windows PowerShell" }
+        $evId   = if ($source -eq "SecuritySentinel") { 4000 } else { 800 }
+        Write-EventLog -LogName Application -Source $source -EventId $evId -EntryType Error -Message "[SecuritySentinel][$Level][Guardian] $Message" -ErrorAction SilentlyContinue
+    } catch {}
+
+    # Append with HMAC chain tag if key is available
+    try {
+        $prevHmac = "0000000000000000"
+        if (Test-Path $LogFile) {
+            $lastLn = Get-Content -Path $LogFile -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($lastLn -and $lastLn -match "\[HMAC:([0-9A-Fa-f]{16})\]$") {
+                $prevHmac = $Matches[1].ToUpper()
+            }
+        }
+        $keyBytes = if ($script:SentinelEntropyBytes -and $script:SentinelEntropyBytes.Length -ge 16) {
+            $script:SentinelEntropyBytes
+        } else {
+            [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_LOG_HMAC_DEFAULT_KEY_V8")
+        }
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$keyBytes)
+        $hashBytes = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$prevHmac|$coreLine"))
+        $hmac.Dispose()
+        $newHmac = ([BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16))
+        Add-Content -Path $LogFile -Value "$coreLine [HMAC:$newHmac]" -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
 }
 
 function Send-TamperDiscordAlert {
@@ -210,7 +265,7 @@ function Send-TamperDiscordAlert {
 
         $ping = if ($cfg.DiscordMentionOnCritical) { "**[CRITICAL TAMPER PROTECTION ALERT]** @everyone" } else { "" }
         $payload = @{
-            username = "Security Sentinel Ultra v7.0 EDR"
+            username = "Security Sentinel Ultra v8.0 EDR"
             content  = $ping
             embeds   = @(@{
                 title       = "[CRITICAL] Tier 3 Tamper Protection: Watchdog Resurrected!"
@@ -222,7 +277,7 @@ function Send-TamperDiscordAlert {
                     @{ name = "Resurrected PID"; value = "$NewPid (Active)";                  inline = $true },
                     @{ name = "Defense Status";  value = $Note;                               inline = $false }
                 )
-                footer = @{ text = "Security Sentinel Ultra v7.0 | Enterprise Self-Defense | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
+                footer = @{ text = "Security Sentinel Ultra v8.0 | Enterprise Self-Defense | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }
             })
         } | ConvertTo-Json -Depth 6
         Invoke-RestMethod -Uri $webhookUrl.Trim() -Method Post -ContentType "application/json; charset=utf-8" -Body $payload -TimeoutSec 5 | Out-Null
@@ -257,11 +312,12 @@ while ($true) {
     }
 
     $wdAlive = $false
-    $lastPid = "Unknown"
+    $lastPid = if ($script:LastKnownWatchdogPid) { $script:LastKnownWatchdogPid } else { "Unknown" }
     if (Test-Path $WatchdogPidF) {
         $rawPid = (Get-Content $WatchdogPidF -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($rawPid -and ($rawPid.Trim() -match "^\d+$")) {
             $lastPid = $rawPid.Trim()
+            $script:LastKnownWatchdogPid = $lastPid
             $proc = Get-Process -Id ([int]$lastPid) -ErrorAction SilentlyContinue
             if ($proc -and $proc.ProcessName -match "^(powershell|pwsh)$") {
                 $wdAlive = $true
@@ -276,46 +332,11 @@ while ($true) {
             exit 0
         }
 
-        $newProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WatchdogPath`"" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-        $newPid = if ($newProc) { "$($newProc.Id)" } else { "Spawned" }
+        $newProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$WatchdogPath`"" -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+        $newPid = if ($newProc) { "$($newProc.Id)"; $script:LastKnownWatchdogPid = "$($newProc.Id)" } else { "Spawned" }
 
         Write-GuardianLog "[TAMPER-GUARD] Watchdog (PID: $lastPid) was unexpectedly terminated! Guardian Twin verified Fail-Closed Trust Anchor SHA-256 and resurrected Watchdog (New PID: $newPid)." "CRITICAL"
         Send-TamperDiscordAlert -DeadPid $lastPid -NewPid $newPid
         Start-Sleep -Seconds 3
     }
 }
-
-# SIG # Begin signature block
-# MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBJaNztbMUb3TDN
-# +HENhx4tv1J36utroyfl72JUALphx6CCAzIwggMuMIICFqADAgECAhBqicxAtgYy
-# tEDV87OXYXwsMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
-# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkxODA2NDBaFw0zMTEx
-# MDkxODE2NDBaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
-# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMNKKvtK
-# ERrpKZl/ygPwjprcar+6Xk/3xKwms9K7GDTSH8EYVjwFvMsNGB8+On0f31+3hmyt
-# KZzePEl5panG4eomaJwGl5qLzD2qyJVAtpgRKh+fiUgjFgm+FOm46u74WMC/Jhr2
-# UZe+h6PpO7eoAizbrVRHPaHIOSfIMxnQFVtkkV66T0O5ELGaqTsLZbeQRZsvf6pl
-# mIRLQ7nDIzQ6HqRuaWYfU/GNB8/uDhymxuRyLVV6y6pJ/lO2plVgHwC1JHIT7M+S
-# t6Fx8wOkUB9McT6P/T4uXHP56PufSxPC7Q4IgDBQ4sQr6NKqtxzVeZ8LBeZW9dsF
-# /E1ggkQ3GpNEDmECAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMDMB0GA1UdDgQWBBTzQylDY2rNT15+NYtrGro9m44IMjANBgkqhkiG
-# 9w0BAQsFAAOCAQEASGAB2FcY0MsNMQsmt1MEmkmsNWWM15Bf3/gojZQeA84NS39J
-# Q3AvtZsrUFq7czi6dm0Oh5GtmEhBBaXxdQeZc48SviS1ZkH+ydm4wFNDz0htXqem
-# K5iqgz9JWlYbO0Q1SpCwnrL2lqtXUTqnq1K83NVlyEfMJy1N/pve+DlOLEBjvPvr
-# PJDNfUZ79skHaztddUvFUfRFIOaMr0sop2XozdqDsD3Au4im941zJTleYk7m+0Qx
-# V0WFPnXMN88dI7JkFgmgmoT53b362u5EU9KHRnwLNjrGIb4+NpAH5QtH7Xl1hqde
-# Hxvq+WiRbpJEMEiPyUN71mzSsOfIzKk16U4MIjGCAfUwggHxAgEBMEMwLzEtMCsG
-# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhBqicxA
-# tgYytEDV87OXYXwsMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
-# oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIKTzXA8EcBxt8fCd1pTE
-# +EsUEIeoQEsx/Bqj06kbEw02MA0GCSqGSIb3DQEBAQUABIIBAL4wA1vaBCA+UmYX
-# i0Qfm8uaf87Txkf4oZzHXXDdlGYujFlfi+TKeR5U9Bul03yRVUb4PEYVYHWFpKAa
-# 0BMS10h3JtrF72RpbByiAXFDM58auqxGHa2ghCu7dpC/v88Sr8w/TivQWNiFpMeX
-# hOQX0+Gj+Fd3gYqRIzFjsq4oTA/wiVsKOGQ8paHaVsEKnJ8heEO6UVezrQ9zfJzl
-# JQb51r+bc3bFWJMNA/DeEIoBUT+gPSeHy1K77kD/ysATDaC6udBI2h8dUAqP5qeC
-# YgCTqmN0B7PS0TJgkHvZTqsIwCX47rm7LY9Gnj2fkXkiO9tbyy+N5mY56tHR9O+i
-# G1y514k=
-# SIG # End signature block

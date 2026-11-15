@@ -1,136 +1,90 @@
-# 🛡️ Security Sentinel Ultra v8.0 (Enterprise EDR & Threat Defense)
+# 🛡️ Security Sentinel Ultra v8.0 (User-Mode EDR & Endpoint Telemetry)
 
-**Autonomous Endpoint Threat Defense, Work & Gaming Safe-Mode, Authenticode Code Signing, DPAPI Secret Vault, Phishing Parent Matrix, 64MB Memory Injection Forensics & Real E2E Tested Watchdog for Windows 10 / 11**  
-*Zero-Dependency • 0% Gaming FPS Impact • Zero Work/IDE Disruption • v8.0 Enterprise EDR Architecture*
-
----
-
-## 🌟 Overview (ภาพรวมระบบ v8.0 Enterprise EDR Edition)
-
-**Security Sentinel Ultra v8.0** คือระบบป้องกัน Endpoint ขนาดพกพา (Portable EDR / HIDS) ระดับ Enterprise ที่ออกแบบมาเพื่อเครื่องที่ต้องใช้งานหนักทั้ง **การทำงาน (Coding / Dev / Office) และการเล่นเกม (Gaming) บน Windows 10 / 11** 
-
-ในเวอร์ชัน 8.0 ได้ผ่านการปรับปรุงสถาปัตยกรรมความปลอดภัยตามข้อเสนอแนะจากการทดสอบและ Security Code Audit เชิงลึก ครบทั้งการเข้ารหัสความลับด้วย DPAPI, การเซ็นสัญญาดิจิทัล Authenticode, การบันทึก Log ลง Windows Event Viewer, การอุดช่องโหว่การปลอมชื่อโปรเซส (Name-Spoofing), การป้องกันการ Bypass ข้อยกเว้น Dashboard, และการเพิ่มเกณฑ์ตรวจจับ Phishing Macro จากชุดโปรแกรม Office และ PDF
+**User-Mode (Ring 3) Endpoint Threat Defense, Work & Gaming Safe-Mode, Authenticode Code Signing, DPAPI Secret Vault, Phishing Parent Matrix, Tamper-Evident HMAC Logging & Short-Lived Process Telemetry for Windows 10 / 11**  
+*Zero-Dependency • Low Resource Footprint • Work/IDE Safe-Mode • Automated Windows CI Verified*
 
 ---
 
-## 🚀 ไฮไลท์การอัปเกรดใน Security Sentinel Ultra v8.0
+## 🌟 Overview (ภาพรวมระบบ v8.0)
 
-### 1. 🔏 Authenticode Code Signing (`core/Sign-Scripts.ps1`)
-* สร้างใบรับรองดิจิทัลแบบ SHA-256 (อายุ 5 ปี) และเซ็น Digital Signature ลงในสคริปต์ `.ps1` ทุกตัวในระบบ
-* รองรับการเปิดใช้งานนโยบายความปลอดภัยสูงสุดของ Windows:
-  ```powershell
-  Set-ExecutionPolicy -ExecutionPolicy AllSigned -Scope CurrentUser
-  ```
-* ป้องกันไม่ให้สคริปต์ถูกดัดแปลง (Tamper-Proof) และป้องกันการบล็อกโดย Windows SmartScreen
+**Security Sentinel Ultra v8.0** คือเครื่องมือตรวจจับและตอบโต้ภัยคุกคามระดับ User-Mode (Ring 3 EDR / HIDS) สำหรับ Windows 10 / 11 ที่ออกแบบให้ทำงานควบคู่กับการทำงาน (Coding / Dev / Office) และการเล่นเกม (Gaming) โดยใช้ทรัพยากรต่ำและไม่กระทบกับระบบ Anti-Cheat ระดับ Kernel
 
-### 2. 🔐 DPAPI Secret Vault (`System.Security.Cryptography.ProtectedData`)
-* ข้อมูลความลับทั้งหมด เช่น **Discord Webhook URL, API Keys, และโทเคนระบบ** จะถูกเข้ารหัสผ่าน Windows Data Protection API (DPAPI)
-* เข้ารหัสผูกกับ Windows User Account และกุญแจสุ่ม Entropy 256-bit CSPRNG เฉพาะเครื่อง
-* ในไฟล์ `config.json` จะไม่เก็บ Secret แบบ Plaintext อีกต่อไป โดยจะบันทึกในฟิลด์ `DiscordWebhookEncrypted`
-
-### 3. 📜 Windows Event Viewer Integration (Application Log Channel)
-* ส่งต่อ Log เหตุการณ์ความปลอดภัยเข้า Windows Event Viewer โดยตรง (Log: `Application`, Source: `SecuritySentinel`)
-* กำหนด Event IDs มาตรฐาน:
-  * **Event 4000**: Critical Threat / Ransomware / Honeypot Triggered
-  * **Event 4001**: Tier 3 Kernel Micro-Freeze Executed
-  * **Event 4002**: Work & Gaming Safe-Mode Warning / Anomaly
-  * **Event 4003**: Behavioral Telemetry & Information Log
-  * **Event 4004**: System Initialized & Watchdog Running
-  * **Event 4005**: File Quarantined & Rollback Operation
-* ป้องกันผู้โจมตีจากการลบหรือดัดแปลงหลักฐานไฟล์ Text บนดิสก์
-
-### 4. 🎣 Phishing Parent Process Matrix (+50 Risk Score & Immediate Freeze)
-* เพิ่มเมทริกซ์ตรวจจับโปรเซสต้นทางกลุ่มเสี่ยงสูง (High-Risk Phishing Parents):
-  * **Microsoft Office**: `winword.exe`, `excel.exe`, `powerpnt.exe`, `outlook.exe`, `msaccess.exe`, `eqnedt32.exe`
-  * **PDF Readers**: `acrord32.exe`, `acrobat.exe`, `foxitreader.exe`
-  * **Archivers**: `winrar.exe`, `7zfm.exe`, `peazip.exe`
-  * **Script Hosts**: `wscript.exe`, `cscript.exe`, `mshta.exe`
-* เมื่อตรวจพบโปรแกรมกลุ่มนี้พยายามสร้าง Shell (`powershell.exe`, `cmd.exe`, `pwsh.exe`) หรือ LOLBin ระบบจะบวกคะแนนความเสี่ยงทันที **+50 คะแนน** ทำให้คะแนนรวมทะลุเกณฑ์ Freeze (>= 85) ทันทีตั้งแต่ Process ถูกสร้าง!
-
-### 5. 🛡️ Dashboard Anti-Bypass & Zero-Trust Verification
-* อุดช่องโหว่การต่อท้ายคำสั่งด้วยชื่อสคริปต์เพื่อหลบการตรวจจับ (เช่น `powershell -enc <payload> SentinelDashboard.ps1`)
-* ฟังก์ชัน `Test-IsVerifiedSentinelScript` ตรวจสอบอย่างเข้มงวด:
-  1. ปฏิเสธทันทีหากมีพารามิเตอร์ Encode (`-enc`, `-encodedcommand`) หรือ Inline Command (`-c`, `-command`, `iex`)
-  2. ตรวจสอบพารามิเตอร์ `-File "<path>"` และตรวจสอบว่าไฟล์นั้นอยู่จริงในโฟลเดอร์ที่ได้รับอนุญาต
-  3. คำนวณ SHA-256 ของไฟล์นั้นจริงเทียบกับ Trust Anchor
-  4. ปฏิเสธคำสั่งที่มี Chaining Operators (`&&`, `||`, `;`, `|`)
-
-### 6. 🛑 Safe-Mode Zero-Trust Name-Spoofing Immunity
-* ตัดการตรวจสอบชื่อไฟล์ฝั่ง Child Process (`$cName`) ออกจาก Safe-Mode
-* ป้องกันมัลแวร์ที่ไม่มีลายเซ็นใน `%TEMP%` แต่ตั้งชื่อเลียนแบบเครื่องมือ Dev เช่น `node.exe`, `python.exe`, `git.exe`
-* บังคับตรวจสอบลายเซ็นและพาธจริงของ Parent เท่านั้น และแจ้งเตือนระดับ `WARN` เสมอ
-
-### 7. 🧠 64 MB Live Memory Forensics & Injection Hunter
-* ขยายเพดานการสแกน RAM จาก 16 MB เป็น **64 MB** และอ่านสูงสุด **1 MB ต่อ Memory Region**
-* ตรวจสอบหน้าหน่วยความจำ `PAGE_EXECUTE_READWRITE` (RWX) และ `PAGE_EXECUTE_READ` ที่ไม่มีไฟล์รองรับบนดิสก์ (Unbacked Memory)
-* ดึง Injected C2 URL, Reflective PE Headers (`MZ`/`PE`), และ Shellcode ออกมาวิเคราะห์แบบ Real-Time
-
-### 8. 🚦 Dashboard 3-State Traffic Light & One-Click Rollback
-* ปรับปรุงหน้าต่างควบคุม GUI ให้มีไฟสถานะ 3 สี:
-  * 🟢 **SECURE / OPTIMAL**: ระบบทำงานปกติ ไม่มีภัยคุกคาม
-  * 🟡 **SUSPICIOUS / ELEVATED**: มีการตรวจพบ Anomaly หรือเฝ้าระวัง Safe-Mode
-  * 🔴 **ACTIVE THREAT / BLOCKED**: ตรวจพบมัลแวร์หรือมีการ Micro-Freeze
-* ปุ่ม **`[RESUME / ROLLBACK]`**: สั่งปลดล็อก (Thaw) โปรเซสและกู้คืนไฟล์จาก Quarantine กลับสู่ตำแหน่งเดิมได้ในคลิกเดียว
+ในเวอร์ชัน 8.0 ได้ปรับปรุงสถาปัตยกรรมตามผลการตรวจสอบด้านความปลอดภัย (Red-Team & Code Audit):
+- **A1 (Authenticated & Elevated Stop Flow):** การหยุด/พักการทำงานผ่าน `Stop-Shield.ps1`, เมนู System Tray หรือปุ่มบน Dashboard บังคับสิทธิ์ Administrator (UAC) พร้อมการยืนยันจากผู้ใช้ ส่งสัญญาณผ่าน Authenticated Stop Token ให้ Watchdog และ Guardian หยุดตัวเองอย่างปลอดภัย (ไม่มีการ `Stop-Process -Force` ทับ) บันทึก Windows Event Log (`EventID 4006`) ทุกครั้ง และตั้งเวลาเปิดกลับอัตโนมัติ (Auto-Resume 15 นาที)
+- **A2 (Registry Trust Anchor ACL):** ล็อกสิทธิ์ `HKLM:\SOFTWARE\SecuritySentinel` แบบ `SetAccessRuleProtection($true, $false)` โดยอนุญาตเฉพาะ `NT AUTHORITY\SYSTEM` และ `BUILTIN\Administrators` (`Allow FullControl`) โดยไม่ใส่กฎ `Deny` บน `BUILTIN\Users` เพื่อไม่ให้บล็อกผู้ดูแลระบบที่ยกระดับสิทธิ์แล้ว (เนื่องจาก Admin เป็นสมาชิกของกลุ่ม Users ด้วย)
+- **A3 (Unified CSPRNG Secret & Fail-Closed Token):** ใช้กลไกอ่านกุญแจความลับชุดเดียวกันทุกคอมโพเนนต์ (`HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor\InstallSecret` เป็นหลัก และไฟล์ DPAPI `vault.sec` ขนาด 256-bit CSPRNG สำหรับโหมดผู้ใช้) พร้อมตัดค่าคงที่สาธารณะ (`SENTINEL_ULTRA_V6_ENTROPY_...`) ออกทั้งหมด
+- **A4 (Safe-Mode Parent Path Hardening):** ยกเลิกการเชื่อถือโฟลเดอร์ที่ผู้ใช้เขียนเองได้ (`AppData\Local\Programs`) จากเกณฑ์ตรวจพาธของ Safe-Mode Parent โดยอนุญาตเฉพาะพาธภายใต้ `Program Files` / `Windows` หรือไฟล์ที่มีลายเซ็นดิจิทัล Authenticode ถูกต้องเท่านั้น
+- **B1–B5 (10-Script Trust Anchor, Safe Start Verification & Authenticode Pinning):**
+  - รวมสคริปต์หลักครบทั้ง 10 ไฟล์ (`SentinelWatchdog.ps1`, `SentinelGuardian.ps1`, `SentinelDashboard.ps1`, `SentinelTray.ps1`, `Start-Shield.ps1`, `Stop-Shield.ps1`, `Sign-Scripts.ps1`, `Install.ps1`, `Uninstall.ps1`, `Invoke-RedTeamAudit.ps1`) ไว้ใน Trust Anchor
+  - เมื่อติดตั้งด้วยสิทธิ์ Admin ลง `C:\Program Files\SecuritySentinel` ระบบจะเก็บเฉพาะโค้ดไว้ใน `Program Files` และแยกไฟล์สถานะ/Log ไว้ใน `%LOCALAPPDATA%\SecuritySentinel`
+  - `Start-Shield.ps1` ตรวจสอบค่า SHA-256 กับ Trust Anchor ก่อนรัน และรอตรวจสอบว่าโปรเซส Watchdog/Guardian ทำงานจริงก่อนแจ้งสถานะ `ACTIVE & PROTECTING`
+  - `Sign-Scripts.ps1` ใช้ใบรับรองตัวเดิมซ้ำโดยอัตโนมัติ ล้างใบรับรองเก่าที่ซ้ำซ้อน บันทึก `TrustedCertThumbprint` ลง Trust Anchor และทำลาย CNG Private Key Container จริงเมื่อระบุ `-PurgePrivateKey`
+- **C1 (Tamper-Evident Log HMAC Chain & Event Log Primary):** บันทึกเหตุการณ์หลักลง Windows Event Viewer (`Application` Log, Source `SecuritySentinel`) และต่อท้ายบรรทัดใน `sentinel.log` ด้วยลูกโซ่ `[HMAC:<16-hex>]` (HMAC-SHA256) พร้อมฟังก์ชัน `Test-SentinelLogIntegrity` เพื่อตรวจจับการแก้ไขหรือลบบรรทัดย้อนหลัง
+- **C3 (Short-Lived Process Telemetry):** รองรับการอ่าน Security Event ID `4688` (พร้อม CommandLine Auditing) และ Sysmon Event ID `1` เพื่อตรวจจับโปรเซสอายุสั้นที่ทำงานและจบลงก่อนรอบการสแกนของ WMI
+- **C4 (PID-Verified Dashboard Tracking):** ติดตามสถานะหน้าต่าง Dashboard ด้วย `dashboard.pid` และตรวจสอบ CommandLine จริงแทนการเทียบชื่อไตเติลหน้าต่าง
 
 ---
 
-## 🧪 การทดสอบระบบ (Test Suites)
+## ⚠️ ขอบเขตสถาปัตยกรรมและข้อจำกัด (Ring 3 User-Mode vs Ring 0 Kernel-Mode Scope)
 
-ระบบมาพร้อมชุดทดสอบอัตโนมัติ 2 ชุดที่ผ่านการทดสอบ 100%:
+เพื่อให้เข้าใจขอบเขตการป้องกันตามความเป็นจริง (Honest Threat Model):
+
+1. **ทำงานในระดับ User-Mode (Ring 3) เท่านั้น:**
+   - โปรแกรมนี้ทำงานเป็นโปรเซส PowerShell/.NET ในระดับ User-Mode **ไม่ใช่** Kernel Driver (Ring 0), ELAM Driver หรือบริการ Protected Process Light (PPL)
+   - การล็อก Kernel Object DACL (`HardenCurrentProcessDacl`) ที่จำกัด `OWNER RIGHTS (S-1-3-4)` ช่วยป้องกันโปรเซสในระดับผู้ใช้ทั่วไป (Unprivileged User-Mode) ไม่ให้สั่ง `OpenProcess(PROCESS_TERMINATE | WRITE_DAC)` ได้โดยตรง
+2. **ขอบเขตเมื่อผู้โจมตีได้สิทธิ์ Administrator หรือ SYSTEM แล้ว:**
+   - หากมัลแวร์หรือผู้โจมตีได้รับสิทธิ์ **Administrator (Elevated)** หรือ **SYSTEM** แล้ว ผู้โจมตีสามารถใช้สิทธิ์ `SeDebugPrivilege` / `SeTakeOwnershipPrivilege` เพื่อหยุดโปรเซสระดับ Ring 3, อ่านค่า `InstallSecret` จาก `HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor`, หรือแก้ไข Scheduled Task ได้
+3. **ขอบเขตของ DPAPI (`CurrentUser`) ในโหมดไม่ได้ติดตั้งด้วยสิทธิ์ Admin:**
+   - หากรันในโหมดผู้ใช้ทั่วไปโดยไม่ได้ติดตั้ง `HKLM` Trust Anchor กุญแจความลับใน `vault.sec` และค่าใน `config.json` จะถูกปกป้องด้วย DPAPI (`DataProtectionScope::CurrentUser`) ซึ่งป้องกันการคัดลอกไฟล์ไปถอดรหัสในเครื่องอื่นหรือบัญชีอื่น แต่ไม่สามารถป้องกันมัลแวร์ที่รันภายใต้บัญชีผู้ใช้เดียวกันได้ ดังนั้นจึงแนะนำให้ติดตั้งผ่าน `1-Click-Install.bat` ด้วยสิทธิ์ Administrator เสมอ
+4. **ความเร็วในการตรวจจับโปรเซส (Process Creation Telemetry):**
+   - เมื่อรันด้วยสิทธิ์ Administrator ระบบจะลงทะเบียน `Win32_ProcessStartTrace` (ETW) ควบคู่กับการอ่าน Security Event ID `4688` (CommandLine Auditing) เพื่อลดช่องว่างของโปรเซสที่เกิดและจบเร็ว (Sub-second processes) อย่างไรก็ตาม การระงับโปรเซส (`NtSuspendProcess`) ยังคงเป็นการตอบสนองแบบ Asynchronous ใน User-Mode ไม่ใช่การบล็อกแบบ Inline Pre-Execution ในระดับ Kernel (`PsSetCreateProcessNotifyRoutineEx`)
+
+---
+
+## 🧪 การทดสอบระบบ (Automated Test Suites & CI)
+
+ระบบมาพร้อมชุดทดสอบอัตโนมัติ 2 ชุด และเวิร์กโฟลว์ GitHub Actions (`.github/workflows/ci.yml`) บน `windows-latest`:
 
 ### 1. Standalone Unit Tests (`tests/Run-Tests.ps1`)
-รันการทดสอบ Unit Test 17 รายการ ครอบคลุม DPAPI, Anti-Bypass, Phishing, Name-Spoofing, และ Canary:
+ทดสอบ DPAPI, การปฏิเสธ Static Entropy (A3), Registry ACL แบบไม่มี Deny Users (A2), การป้องกัน Spoofed Parent ใน `AppData\Local\Programs` (A4), การตรวจจับการแก้ไฟล์ Log ด้วย HMAC Chain (C1), และการแปลง XML ของ Event 4663 / 4688 (C3):
 ```powershell
-powershell -ExecutionPolicy Bypass -File tests/Run-Tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/Run-Tests.ps1
 ```
-*ผลลัพธ์:* **17 / 17 TESTS PASSED (0 FAILED)**
 
 ### 2. Live End-to-End Red-Team Audit (`core/Invoke-RedTeamAudit.ps1`)
-รันการทดสอบฟังก์ชันจริงบนระบบ Windows 11 ครอบคลุม Memory Injection, DACL Lock, Quarantine Rollback:
+ทดสอบฟังก์ชันจริงของ `SentinelWatchdog.ps1` และ `SentinelGuardian.ps1` บน Windows 10/11:
 ```powershell
-powershell -ExecutionPolicy Bypass -File core/Invoke-RedTeamAudit.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File core/Invoke-RedTeamAudit.ps1
 ```
-*ผลลัพธ์:* **9 / 9 TESTS PASSED (0 FAILED)**
-
----
-
-## 📦 คำแนะนำการแจกจ่ายและการใช้งาน (Distribution & False-Positive Prevention)
-
-> [!IMPORTANT]
-> **เหตุใด Cloud Drive (เช่น Google Drive) หรือ Antivirus ถึงแจ้งเตือนไฟล์สคริปต์ความปลอดภัย?**
-> ระบบ Cloud Scanner เช่น Google Drive และ Mail Gateway ใช้ระบบ AI/Static Heuristic ในการตรวจไฟล์ `.ps1` ดิบๆ ที่มีคำสั่งระดับลึก (เช่น การเรียก P/Invoke, การสั่ง Killswitch, หรือการจัดการ Process) และอาจจัดหมวดหมู่ผิดพลาดว่าเป็น **False Positive** (มัลแวร์ที่คล้ายกัน)
-
-### แนวทางปฏิบัติในการแชร์หรือติดตั้ง:
-1. **การดาวน์โหลด / แชร์ผ่าน GitHub**: แนะนำให้ Clone หรือดาวน์โหลดจาก GitHub Repository โดยตรง
-2. **การแชร์เป็นไฟล์บีบอัด**: ให้บีบอัดเป็น `.zip` หรือ `.7z` โดย **ตั้งรหัสผ่านป้องกัน (Password-Protected)** เช่น รหัส `1234` เพื่อไม่ให้ Cloud AI สแกนตรวจจับผิดพลาด
-3. **การแปลงเป็นตัวติดตั้งสำหรับ User ทั่วไป (Enterprise Installer)**:
-   * ใช้เครื่องมืออย่าง **Inno Setup** หรือ **Advanced Installer** แพ็กโฟลเดอร์ทั้งหมดเป็นไฟล์ติดตั้งไฟล์เดียว (`Setup.exe` หรือ `.msi`)
-   * เซ็น Digital Certificate ลงบนไฟล์ `.exe` ตัวติดตั้ง เพื่อให้ติดตั้งได้ง่ายและผ่าน Windows SmartScreen อย่างราบรื่น
 
 ---
 
 ## 📜 โครงสร้างไฟล์ในโครงการ
 
 ```
-D:\Hotel\SecuritySentinel_GitRepo/
-├── 1-Click-Install.bat            # ตัวติดตั้งสิทธิ์ Administrator อัตโนมัติ
+git_security/
+├── 1-Click-Install.bat            # ตัวติดตั้งระบบ (แนะนำให้คลิกขวา Run as administrator)
 ├── 1-Click-Uninstall.bat          # ตัวถอนการติดตั้งและกู้คืนสถานะเครื่อง
+├── Start-Shield.bat               # ตัวสั่งเปิดการทำงานพร้อมตรวจสอบสถานะจริง
+├── Stop-Shield.bat                # ตัวสั่งพักการทำงานชั่วคราว (บังคับ UAC Admin + Auto-Resume)
 ├── Sentinel-Dashboard.bat         # ชอร์ตคัทเปิด GUI Dashboard
-├── README.md                      # เอกสารคู่มือฉบับสมบูรณ์ (v8.0)
-├── README.txt                     # สรุปภาพรวมแบบพกพา
+├── Sentinel-Tray.bat              # ชอร์ตคัทเปิดไอคอน System Tray
+├── README.md                      # เอกสารคู่มือและขอบเขตสถาปัตยกรรม
+├── README.txt                     # สรุปวิธีใช้งานและขอบเขตความปลอดภัย
+├── .github/workflows/ci.yml       # GitHub Actions Windows CI
 ├── core/
-│   ├── SentinelWatchdog.ps1       # แกนหลัก EDR ตรวจจับภัยคุกคามแบบ Real-Time (v8.0)
-│   ├── SentinelGuardian.ps1       # ตัวเฝ้าระวังคู่แฝด ควบคุม Integrity & DACL (v8.0)
-│   ├── SentinelDashboard.ps1      # GUI Command Center (WPF/XAML) ไฟ 3 สี + One-Click Rollback
-│   ├── Sign-Scripts.ps1           # สคริปต์สร้างใบรับรองและเซ็น Authenticode ให้ไฟล์ทั้งหมด
-│   ├── Invoke-RedTeamAudit.ps1    # ชุดทดสอบ Live E2E Audit ครบ 9 ด้าน
+│   ├── SentinelWatchdog.ps1       # แกนหลักตรวจจับภัยคุกคาม (User-Mode EDR)
+│   ├── SentinelGuardian.ps1       # โปรเซสคู่แฝดตรวจสอบ Trust Anchor & DACL
+│   ├── SentinelDashboard.ps1      # GUI Command Center (WPF/XAML)
+│   ├── SentinelTray.ps1           # System Tray Agent
+│   ├── Start-Shield.ps1           # สคริปต์ตรวจสอบ Hash และเริ่มการทำงานของระบบ
+│   ├── Stop-Shield.ps1            # สคริปต์พักการทำงานแบบยืนยันตัวตนระดับ Admin
+│   ├── Sign-Scripts.ps1           # สคริปต์จัดการใบรับรองและเซ็น Authenticode
+│   ├── Invoke-RedTeamAudit.ps1    # ชุดทดสอบ Live E2E Audit
 │   ├── Install.ps1                # สคริปต์ติดตั้งระบบและตั้งค่า HKLM Trust Anchor
 │   ├── Uninstall.ps1              # สคริปต์ถอนการติดตั้ง
-│   └── config.json                # ไฟล์ตั้งค่าระบบ (รองรับ DPAPI Encrypted Webhook)
+│   └── config.json                # ไฟล์ตั้งค่าระบบเริ่มต้น
 └── tests/
     ├── Run-Tests.ps1              # ตัวรัน Unit Test แบบ Zero-Dependency
     └── SecuritySentinel.Tests.ps1 # Pester Unit Test Suite
 ```
-
----
-*Security Sentinel Ultra v8.0 - Autonomous Enterprise Threat Defense Engine*

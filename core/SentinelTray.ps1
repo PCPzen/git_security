@@ -1,19 +1,103 @@
 # =====================================================================
 # Security Sentinel Ultra v8.0 - System Tray Companion (NotifyIcon)
-# Provides instant access from Windows Taskbar System Tray (^ menu)
+# Instant Taskbar access, PID-verified Dashboard focus, UAC-verified Stop,
+# Trust-Anchor script verification & 15-minute Auto-Resume monitor
 # =====================================================================
-
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Security
 
-$StateDir      = "$env:LOCALAPPDATA\SecuritySentinel"
-$PidFile       = Join-Path $StateDir "sentinel.pid"
-$CoreDir       = $PSScriptRoot
-$RootDir       = Split-Path -Parent $PSScriptRoot
-$DashboardScript = Join-Path $CoreDir "SentinelDashboard.ps1"
-$StartScript     = Join-Path $CoreDir "Start-Shield.ps1"
-$StopScript      = Join-Path $CoreDir "Stop-Shield.ps1"
+$ProgDir       = "$env:ProgramFiles\SecuritySentinel"
+$StateDir      = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) {
+    $env:SENTINEL_STATE_DIR
+} else {
+    "$env:LOCALAPPDATA\SecuritySentinel"
+}
+$SentinelDir   = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
+    $ProgDir
+} elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
+    $PSScriptRoot
+} else {
+    $StateDir
+}
+
+$PidFile         = Join-Path $StateDir "sentinel.pid"
+$DashPidFile     = Join-Path $StateDir "dashboard.pid"
+$PauseFile       = Join-Path $StateDir "paused_until.txt"
+$ManifestFile    = Join-Path $StateDir "manifest.json"
+$DashboardScript = Join-Path $SentinelDir "SentinelDashboard.ps1"
+$StartScript     = Join-Path $SentinelDir "Start-Shield.ps1"
+$StopScript      = Join-Path $SentinelDir "Stop-Shield.ps1"
 $QuarDir         = Join-Path $StateDir "quarantine"
+
+if (-not ("SentinelTrayNative.WinUtil" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace SentinelTrayNative {
+    public static class WinUtil {
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    }
+}
+"@ -ErrorAction SilentlyContinue
+}
+
+function Get-SentinelSecret {
+    Remove-Item -Path "HKCU:\Software\SecuritySentinel" -Recurse -Force -ErrorAction SilentlyContinue
+    $regPath = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regPath) {
+        $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+        if ($b64) {
+            try {
+                $bytes = [Convert]::FromBase64String($b64)
+                if ($bytes -and $bytes.Length -ge 16) { return $bytes }
+            } catch {}
+        }
+    }
+    $vaultFile = Join-Path $StateDir "vault.sec"
+    if (Test-Path $vaultFile) {
+        try {
+            $encB64 = (Get-Content $vaultFile -Raw -Encoding UTF8 -ErrorAction Stop).Trim()
+            $encBytes = [Convert]::FromBase64String($encB64)
+            $decBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($encBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            if ($decBytes -and $decBytes.Length -ge 16) { return $decBytes }
+        } catch {}
+    }
+    return $null
+}
+
+function Test-TrustedScriptIntegrity([string]$FilePath) {
+    if (-not (Test-Path $FilePath -PathType Leaf)) { return $false }
+    $leaf = Split-Path $FilePath -Leaf
+    $actual = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+    if (-not $actual) { return $false }
+
+    $regAnchor = "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor"
+    if (Test-Path $regAnchor) {
+        $expected = (Get-ItemProperty -Path $regAnchor -Name $leaf -ErrorAction SilentlyContinue).$leaf
+        if ($expected) { return ($actual.ToUpper() -eq "$expected".Trim().ToUpper()) }
+    }
+    if (Test-Path $ManifestFile) {
+        try {
+            $sec = Get-SentinelSecret
+            if ($sec) {
+                $mObj = Get-Content $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($mObj -and $mObj.SealedHashes) {
+                    $enc = [Convert]::FromBase64String($mObj.SealedHashes)
+                    $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $sec, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+                    $parsed = ([System.Text.Encoding]::UTF8.GetString($dec)) | ConvertFrom-Json
+                    if ($parsed.$leaf) {
+                        return ($actual.ToUpper() -eq "$($parsed.$leaf)".Trim().ToUpper())
+                    }
+                }
+            }
+        } catch {}
+    }
+    return $false
+}
 
 # 1. Initialize Application Context & NotifyIcon
 $appContext = New-Object System.Windows.Forms.ApplicationContext
@@ -25,86 +109,107 @@ $notify.Visible = $true
 
 function Test-IsShieldActive {
     if (Test-Path $PidFile) {
-        $rPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-        if ($rPid -match '^\d+$') {
-            $p = Get-Process -Id [int]$rPid -ErrorAction SilentlyContinue
-            if ($p) { return $true }
+        $rPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($rPid -and ($rPid.Trim() -match '^\d+$')) {
+            $p = Get-Process -Id ([int]$rPid.Trim()) -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -match '^(powershell|pwsh)$') { return $true }
         }
     }
     return $false
 }
 
 function Open-Dashboard {
-    try {
-        $existingDash = Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match "Security Sentinel" }
-        if ($existingDash) {
-            # Bring existing window to front
-            Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class WinUtil {
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-}
-"@ -ErrorAction SilentlyContinue
-            [WinUtil]::SetForegroundWindow($existingDash.MainWindowHandle) | Out-Null
-            return
-        }
-    } catch {}
+    # C4: Use recorded dashboard.pid + command-line verification instead of spoofable window title
+    if (Test-Path $DashPidFile) {
+        try {
+            $dRaw = (Get-Content $DashPidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($dRaw -and ($dRaw.Trim() -match '^\d+$')) {
+                $dPidInt = [int]$dRaw.Trim()
+                $dProc = Get-Process -Id $dPidInt -ErrorAction SilentlyContinue
+                if ($dProc -and $dProc.MainWindowHandle -ne [IntPtr]::Zero) {
+                    $cimD = Get-CimInstance Win32_Process -Filter "ProcessId = $dPidInt" -ErrorAction SilentlyContinue
+                    if ($cimD -and $cimD.CommandLine -match "SentinelDashboard\.ps1") {
+                        [void][SentinelTrayNative.WinUtil]::ShowWindowAsync($dProc.MainWindowHandle, 9)
+                        [void][SentinelTrayNative.WinUtil]::SetForegroundWindow($dProc.MainWindowHandle)
+                        return
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    if (-not (Test-TrustedScriptIntegrity -FilePath $DashboardScript)) {
+        [System.Windows.Forms.MessageBox]::Show("SentinelDashboard.ps1 failed Trust Anchor integrity verification! Refusing to launch.", "Security Sentinel Tamper Alert", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$DashboardScript`""
-    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+    $psi.Arguments = "-NoProfile -WindowStyle Hidden -File `"$DashboardScript`""
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     [System.Diagnostics.Process]::Start($psi) | Out-Null
 }
 
 function Start-ShieldAction {
+    if (-not (Test-TrustedScriptIntegrity -FilePath $StartScript)) {
+        $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Start-Shield.ps1 failed integrity check!", [System.Windows.Forms.ToolTipIcon]::Error)
+        return
+    }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$StartScript`""
+    $psi.Arguments = "-NoProfile -WindowStyle Hidden -File `"$StartScript`" -Quiet"
     $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     $psi.CreateNoWindow = $true
     [System.Diagnostics.Process]::Start($psi) | Out-Null
 
-    $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Shield protection starting...", [System.Windows.Forms.ToolTipIcon]::Info)
+    $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Verifying Trust Anchor and starting shield...", [System.Windows.Forms.ToolTipIcon]::Info)
 }
 
 function Stop-ShieldAction {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$StopScript`""
-    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $psi.CreateNoWindow = $true
-    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    if (-not (Test-TrustedScriptIntegrity -FilePath $StopScript)) {
+        $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Stop-Shield.ps1 failed integrity check!", [System.Windows.Forms.ToolTipIcon]::Error)
+        return
+    }
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "Are you sure you want to pause Security Sentinel Shield for 15 minutes?`n`nAdministrator privileges (UAC) are required and this action will be recorded in the Windows Event Log.",
+        "Confirm Pause Security Sentinel",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
-    $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Shield protection paused/stopped.", [System.Windows.Forms.ToolTipIcon]::Warning)
+    try {
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -File `"$StopScript`" -PauseMinutes 15 -Confirmed" -Verb RunAs -WindowStyle Hidden -ErrorAction Stop | Out-Null
+        $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Shield paused for 15 minutes (Auto-resume armed).", [System.Windows.Forms.ToolTipIcon]::Warning)
+    } catch {
+        $notify.ShowBalloonTip(3000, "Security Sentinel Ultra", "Pause cancelled (Administrator elevation required).", [System.Windows.Forms.ToolTipIcon]::Info)
+    }
 }
 
 # 2. Build Context Menu (Right-Click)
 $menu = New-Object System.Windows.Forms.ContextMenu
 
-$headerItem = New-Object System.Windows.Forms.MenuItem("🛡️ Security Sentinel Ultra v8.0")
+$headerItem = New-Object System.Windows.Forms.MenuItem("Security Sentinel Ultra v8.0")
 $headerItem.Enabled = $false
 [void]$menu.MenuItems.Add($headerItem)
 
 [void]$menu.MenuItems.Add("-")
 
-$openDashItem = New-Object System.Windows.Forms.MenuItem("🖥️ Open Dashboard", { Open-Dashboard })
+$openDashItem = New-Object System.Windows.Forms.MenuItem("Open Dashboard", { Open-Dashboard })
 $openDashItem.DefaultItem = $true
 [void]$menu.MenuItems.Add($openDashItem)
 
 [void]$menu.MenuItems.Add("-")
 
-$startItem = New-Object System.Windows.Forms.MenuItem("🟢 Start Shield", { Start-ShieldAction })
+$startItem = New-Object System.Windows.Forms.MenuItem("Start Shield", { Start-ShieldAction })
 [void]$menu.MenuItems.Add($startItem)
 
-$stopItem = New-Object System.Windows.Forms.MenuItem("🔴 Stop Shield (Pause)", { Stop-ShieldAction })
+$stopItem = New-Object System.Windows.Forms.MenuItem("Pause Shield (15m / Admin)", { Stop-ShieldAction })
 [void]$menu.MenuItems.Add($stopItem)
 
 [void]$menu.MenuItems.Add("-")
 
-$quarItem = New-Object System.Windows.Forms.MenuItem("📁 Open Quarantine", {
+$quarItem = New-Object System.Windows.Forms.MenuItem("Open Quarantine", {
     if (-not (Test-Path $QuarDir)) { New-Item -ItemType Directory -Path $QuarDir -Force | Out-Null }
     Start-Process "explorer.exe" $QuarDir
 })
@@ -112,7 +217,7 @@ $quarItem = New-Object System.Windows.Forms.MenuItem("📁 Open Quarantine", {
 
 [void]$menu.MenuItems.Add("-")
 
-$exitItem = New-Object System.Windows.Forms.MenuItem("❌ Exit System Tray", {
+$exitItem = New-Object System.Windows.Forms.MenuItem("Exit System Tray", {
     $notify.Visible = $false
     $notify.Dispose()
     [System.Windows.Forms.Application]::Exit()
@@ -121,36 +226,46 @@ $exitItem = New-Object System.Windows.Forms.MenuItem("❌ Exit System Tray", {
 
 $notify.ContextMenu = $menu
 
-# 3. Double-Click or Click to Open Dashboard
+# 3. Double-Click or Left-Click to Open Dashboard
 $notify.Add_DoubleClick({ Open-Dashboard })
 $notify.Add_Click({
-    # If left clicked, open Dashboard
     if ([System.Windows.Forms.Control]::MouseButtons -eq [System.Windows.Forms.MouseButtons]::Left) {
         Open-Dashboard
     }
 })
 
-# 4. Background Timer to keep Tooltip and Menu Status updated
+# 4. Background Timer to keep Tooltip, Menu Status & 15-Minute Auto-Resume updated
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 3000 # Check every 3 seconds
+$timer.Interval = 3000
 $timer.Add_Tick({
     $isActive = Test-IsShieldActive
     if ($isActive) {
         $notify.Text = "Security Sentinel Ultra v8.0`nStatus: SECURED & ACTIVE"
-        $headerItem.Text = "🛡️ Status: Active (Protected)"
+        $headerItem.Text = "Status: Active (Protected)"
         $startItem.Enabled = $false
         $stopItem.Enabled = $true
     } else {
         $notify.Text = "Security Sentinel Ultra v8.0`nStatus: SHIELD OFFLINE"
-        $headerItem.Text = "⚠️ Status: Shield Offline"
+        $headerItem.Text = "Status: Shield Offline"
         $startItem.Enabled = $true
         $stopItem.Enabled = $false
+
+        # Check if 15-minute pause timer has expired -> Auto-Resume!
+        if (Test-Path $PauseFile) {
+            try {
+                $rawTs = (Get-Content $PauseFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+                if ($rawTs -match '^\d+$') {
+                    $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    if ($nowUnix -ge ([long]$rawTs)) {
+                        Remove-Item $PauseFile -Force -ErrorAction SilentlyContinue
+                        Start-ShieldAction
+                    }
+                }
+            } catch {}
+        }
     }
 })
 $timer.Start()
 
-# Initial balloon tip informing user
 $notify.ShowBalloonTip(3000, "Security Sentinel Ultra v8.0", "Active in System Tray. Click here anytime to open the Dashboard.", [System.Windows.Forms.ToolTipIcon]::Info)
-
-# Run message loop
 [System.Windows.Forms.Application]::Run($appContext)

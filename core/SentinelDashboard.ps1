@@ -5,17 +5,21 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic, System.Security
 
-$SentinelDir   = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+$ProgDir       = "$env:ProgramFiles\SecuritySentinel"
+$SentinelDir   = if ($env:SENTINEL_STATE_DIR -and (Test-Path $env:SENTINEL_STATE_DIR)) { $env:SENTINEL_STATE_DIR } else { Join-Path $env:LOCALAPPDATA "SecuritySentinel" }
+$CodeDir       = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) { $ProgDir } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) { $PSScriptRoot } else { $SentinelDir }
 $ConfigFile    = Join-Path $SentinelDir "config.json"
 $PortableCfg   = Join-Path $PSScriptRoot "config.json"
 $LogFile       = Join-Path $SentinelDir "logs\sentinel.log"
 $QuarDir       = Join-Path $SentinelDir "quarantine"
 $PidFile       = Join-Path $SentinelDir "sentinel.pid"
+$DashPidFile   = Join-Path $SentinelDir "dashboard.pid"
 $NetFile       = Join-Path $SentinelDir "network.state"
 $FrozenFile    = Join-Path $SentinelDir "last_frozen.pid"
 $StopTokenFile = Join-Path $SentinelDir "graceful_stop.token"
-$ScriptPath    = Join-Path $SentinelDir "SentinelWatchdog.ps1"
-if (-not (Test-Path $ScriptPath)) { $ScriptPath = Join-Path $PSScriptRoot "SentinelWatchdog.ps1" }
+$ScriptPath    = Join-Path $CodeDir "SentinelWatchdog.ps1"
+$StartScript   = Join-Path $CodeDir "Start-Shield.ps1"
+$StopScript    = Join-Path $CodeDir "Stop-Shield.ps1"
 
 # Ensure directories exist
 @($SentinelDir, (Join-Path $SentinelDir "logs"), $QuarDir) | ForEach-Object {
@@ -45,17 +49,38 @@ function Get-DashboardInstallSecretBytes {
     if (Test-Path $regPath) {
         $b64 = (Get-ItemProperty -Path $regPath -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
         if ($b64) {
-            try { return [Convert]::FromBase64String($b64) } catch {}
+            try {
+                $bytes = [Convert]::FromBase64String($b64)
+                if ($bytes -and $bytes.Length -ge 16) { return $bytes }
+            } catch {}
         }
     }
-    return [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
+    $vaultFile = Join-Path $SentinelDir "vault.sec"
+    if (Test-Path $vaultFile) {
+        try {
+            $encB64 = (Get-Content $vaultFile -Raw -Encoding UTF8 -ErrorAction Stop).Trim()
+            $encBytes = [Convert]::FromBase64String($encB64)
+            $decBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($encBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+            if ($decBytes -and $decBytes.Length -ge 16) { return $decBytes }
+        } catch {}
+    }
+    try {
+        $secretBytes = New-Object byte[] 32
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $rng.GetBytes($secretBytes)
+        $rng.Dispose()
+        $encBytes = [System.Security.Cryptography.ProtectedData]::Protect($secretBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        [System.IO.File]::WriteAllText($vaultFile, [Convert]::ToBase64String($encBytes), [System.Text.Encoding]::UTF8)
+        return $secretBytes
+    } catch {
+        return $null
+    }
 }
 
 $script:SentinelEntropyBytes = Get-DashboardInstallSecretBytes
-$script:LegacyEntropyBytes   = [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_ULTRA_V6_ENTROPY_" + $env:COMPUTERNAME)
 
 function Protect-DpapiString([string]$PlainText) {
-    if ([string]::IsNullOrWhiteSpace($PlainText)) { return "" }
+    if ([string]::IsNullOrWhiteSpace($PlainText) -or (-not $script:SentinelEntropyBytes)) { return "" }
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
         $enc   = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
@@ -64,32 +89,13 @@ function Protect-DpapiString([string]$PlainText) {
 }
 
 function Unprotect-DpapiString([string]$CipherBase64) {
-    if ([string]::IsNullOrWhiteSpace($CipherBase64)) { return "" }
+    if ([string]::IsNullOrWhiteSpace($CipherBase64) -or (-not $script:SentinelEntropyBytes)) { return "" }
     try {
         $enc = [Convert]::FromBase64String($CipherBase64)
-        foreach ($ent in @($script:SentinelEntropyBytes, $script:LegacyEntropyBytes, $null)) {
-            try {
-                $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $ent, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
-                return [System.Text.Encoding]::UTF8.GetString($bytes)
-            } catch {}
-        }
+        $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $script:SentinelEntropyBytes, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        return [System.Text.Encoding]::UTF8.GetString($bytes)
     } catch {}
     return ""
-}
-
-function New-AuthenticatedStopToken {
-    try {
-        $wdPid = "0"
-        if (Test-Path $PidFile) {
-            $rawPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-            if ($rawPid -and ($rawPid.Trim() -match '^\d+$')) { $wdPid = $rawPid.Trim() }
-        }
-        $ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $cipher = Protect-DpapiString "STOP|$wdPid|$ts"
-        if ($cipher) {
-            [System.IO.File]::WriteAllText($StopTokenFile, $cipher, [System.Text.Encoding]::UTF8)
-        }
-    } catch {}
 }
 
 $defaultConfig = [ordered]@{
@@ -507,8 +513,24 @@ $script:lastWallTime  = [DateTime]::UtcNow
 
 function Append-DashboardLog([string]$Msg) {
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    $line = "[$ts] $Msg"
-    Add-Content -Path $LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+    $coreLine = "[$ts] [INFO] $Msg"
+    $prevHmac = "0000000000000000"
+    if (Test-Path $LogFile) {
+        $lastLn = Get-Content -Path $LogFile -Tail 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($lastLn -and $lastLn -match "\[HMAC:([0-9A-Fa-f]{16})\]$") {
+            $prevHmac = $Matches[1].ToUpper()
+        }
+    }
+    $keyBytes = if ($script:SentinelEntropyBytes -and $script:SentinelEntropyBytes.Length -ge 16) {
+        $script:SentinelEntropyBytes
+    } else {
+        [System.Text.Encoding]::UTF8.GetBytes("SENTINEL_LOG_HMAC_DEFAULT_KEY_V8")
+    }
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256(,$keyBytes)
+    $hashBytes = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$prevHmac|$coreLine"))
+    $hmac.Dispose()
+    $newHmac = ([BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16))
+    Add-Content -Path $LogFile -Value "$coreLine [HMAC:$newHmac]" -Encoding UTF8 -ErrorAction SilentlyContinue
 }
 
 function Get-DaemonProcess {
@@ -871,13 +893,13 @@ $btnQuarantine.Add_Click({
     Start-Process "explorer.exe" $QuarDir
 })
 
-# Button: Toggle Shield (Start / Stop)
+# Button: Toggle Shield (Start / Stop with Confirmation, UAC Elevation & Trust Anchor Verification)
 $btnToggleDaemon.Add_Click({
     $runningProc = $null
     if (Test-Path $PidFile) {
-        $rPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-        if ($rPid -match '^\d+$') {
-            $runningProc = Get-Process -Id [int]$rPid -ErrorAction SilentlyContinue
+        $rPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($rPid -and ($rPid.Trim() -match '^\d+$')) {
+            $runningProc = Get-Process -Id ([int]$rPid.Trim()) -ErrorAction SilentlyContinue
         }
     }
     if (-not $runningProc) {
@@ -885,78 +907,55 @@ $btnToggleDaemon.Add_Click({
     }
 
     if ($runningProc) {
-        # Currently RUNNING -> User clicks to STOP the shield
-        New-AuthenticatedStopToken
-        Stop-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction SilentlyContinue
-        Stop-ScheduledTask -TaskName "SecuritySentinelGuardian" -ErrorAction SilentlyContinue
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" } | ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
-        Start-Sleep -Milliseconds 1200
-        if (Test-Path $StopTokenFile) { Remove-Item $StopTokenFile -Force -ErrorAction SilentlyContinue }
-        Append-DashboardLog "[DAEMON] Sentinel Ultra shield stopped/paused by user via Dashboard."
-    } else {
-        # Currently STOPPED -> User clicks to START the shield
+        # A1: Confirm with user, require Administrator elevation via Stop-Shield.ps1 (no force-kill fallback)
+        $confirm = [System.Windows.MessageBox]::Show(
+            "Are you sure you want to pause Security Sentinel Shield for 15 minutes?`n`nAdministrator privileges (UAC) are required and this pause will be recorded in Windows Event Viewer.",
+            "Confirm Pause Security Sentinel",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Warning
+        )
+        if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
         try {
-            Start-ScheduledTask -TaskName "SecuritySentinelWatchdog" -ErrorAction Stop
+            $pStop = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -File `"$StopScript`" -PauseMinutes 15 -Confirmed" -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+            if ($pStop.ExitCode -eq 0) {
+                Append-DashboardLog "[DAEMON] Sentinel Ultra shield paused for 15 minutes by Administrator via Dashboard."
+            } else {
+                Append-DashboardLog "[DAEMON] Shield pause request failed or was rejected (ExitCode: $($pStop.ExitCode))."
+            }
         } catch {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = "powershell.exe"
-            $psi.Arguments = "-NoProfile -File `"$ScriptPath`""
-            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-            $psi.CreateNoWindow = $true
-            [System.Diagnostics.Process]::Start($psi) | Out-Null
+            Append-DashboardLog "[DAEMON] Shield pause cancelled (Administrator elevation declined)."
         }
-        Append-DashboardLog "[DAEMON] Sentinel Ultra shield started by user via Dashboard."
+    } else {
+        # B2 & B3: Delegate start to Start-Shield.ps1 (verifies Trust Anchor SHA-256 & waits for active PIDs)
+        try {
+            $pStart = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$StartScript`" -Quiet" -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+            if ($pStart.ExitCode -eq 0) {
+                Append-DashboardLog "[DAEMON] Sentinel Ultra shield verified and started via Dashboard."
+            } else {
+                Append-DashboardLog "[DAEMON] Shield failed Trust Anchor verification or startup check!"
+            }
+        } catch {
+            Append-DashboardLog "[DAEMON] Failed to invoke Start-Shield.ps1: $($_.Exception.Message)"
+        }
     }
 
-    Start-Sleep -Milliseconds 800
+    Start-Sleep -Milliseconds 500
     Update-DashboardStatus
 })
 
 # Button: Clear Log
 $btnClearLog.Add_Click({
-    $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    "[$ts] [INFO] Telemetry log history cleared by user." | Out-File $LogFile -Encoding UTF8 -Force
+    Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+    Append-DashboardLog "Telemetry log history cleared by user (New HMAC Chain Initialized)."
     Update-DashboardStatus
 })
 
-# Initial render
-Update-DashboardStatus
-$window.ShowDialog() | Out-Null
-
-# SIG # Begin signature block
-# MIIF0QYJKoZIhvcNAQcCoIIFwjCCBb4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDrQfheG9DC+BNb
-# WJ5spxCL6TtqpW1BGjObEYT3D5uLVKCCAzIwggMuMIICFqADAgECAhBqicxAtgYy
-# tEDV87OXYXwsMA0GCSqGSIb3DQEBCwUAMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNl
-# bnRpbmVsIFVsdHJhIENvZGUgU2lnbmluZzAeFw0yNjExMDkxODA2NDBaFw0zMTEx
-# MDkxODE2NDBaMC8xLTArBgNVBAMMJFNlY3VyaXR5IFNlbnRpbmVsIFVsdHJhIENv
-# ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMNKKvtK
-# ERrpKZl/ygPwjprcar+6Xk/3xKwms9K7GDTSH8EYVjwFvMsNGB8+On0f31+3hmyt
-# KZzePEl5panG4eomaJwGl5qLzD2qyJVAtpgRKh+fiUgjFgm+FOm46u74WMC/Jhr2
-# UZe+h6PpO7eoAizbrVRHPaHIOSfIMxnQFVtkkV66T0O5ELGaqTsLZbeQRZsvf6pl
-# mIRLQ7nDIzQ6HqRuaWYfU/GNB8/uDhymxuRyLVV6y6pJ/lO2plVgHwC1JHIT7M+S
-# t6Fx8wOkUB9McT6P/T4uXHP56PufSxPC7Q4IgDBQ4sQr6NKqtxzVeZ8LBeZW9dsF
-# /E1ggkQ3GpNEDmECAwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMDMB0GA1UdDgQWBBTzQylDY2rNT15+NYtrGro9m44IMjANBgkqhkiG
-# 9w0BAQsFAAOCAQEASGAB2FcY0MsNMQsmt1MEmkmsNWWM15Bf3/gojZQeA84NS39J
-# Q3AvtZsrUFq7czi6dm0Oh5GtmEhBBaXxdQeZc48SviS1ZkH+ydm4wFNDz0htXqem
-# K5iqgz9JWlYbO0Q1SpCwnrL2lqtXUTqnq1K83NVlyEfMJy1N/pve+DlOLEBjvPvr
-# PJDNfUZ79skHaztddUvFUfRFIOaMr0sop2XozdqDsD3Au4im941zJTleYk7m+0Qx
-# V0WFPnXMN88dI7JkFgmgmoT53b362u5EU9KHRnwLNjrGIb4+NpAH5QtH7Xl1hqde
-# Hxvq+WiRbpJEMEiPyUN71mzSsOfIzKk16U4MIjGCAfUwggHxAgEBMEMwLzEtMCsG
-# A1UEAwwkU2VjdXJpdHkgU2VudGluZWwgVWx0cmEgQ29kZSBTaWduaW5nAhBqicxA
-# tgYytEDV87OXYXwsMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAI
-# oAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIB
-# CzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIPQW+PvMn18PkTIwOEmo
-# Ua4iwCkJ3AEQxtQjT1Rk/DwJMA0GCSqGSIb3DQEBAQUABIIBAIuDkWIs+nZjxt7z
-# 9erggIt1B4Fk9wdVtAH8GqJFxoc/6YE4D7KBeLGCi6xbBCyal8vxOzsoA898b0G1
-# JOlF0gulsmf8ged+IYQONiei4bnSCP2OVkZFuRZmwEIWklik/ifaltgXjfTzTdY1
-# u1B4ljXvnMEXI41zJbNnonqLzmbL4mcHra22kv9urZxtT0uG+rIZJJIz5GR+36Vo
-# NWMfE7g5la3v5eczEKWAWbWcm5RtACEqxI8W5/lg872hCBRZIIdILg2Vix7mEMiL
-# pbaupLXba9eiW03ZGdUhL1PbZgjoGVd9tdY5+bpomHnJ7bftaCgMSUykCG4WjMUb
-# c/cx6uQ=
-# SIG # End signature block
+# C4: Record Dashboard PID for System Tray verification
+$PID | Out-File -FilePath $DashPidFile -Encoding UTF8 -Force
+try {
+    Update-DashboardStatus
+    $window.ShowDialog() | Out-Null
+} finally {
+    Remove-Item $DashPidFile -Force -ErrorAction SilentlyContinue
+}
