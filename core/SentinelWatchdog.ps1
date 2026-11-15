@@ -20,27 +20,18 @@
 #    so the Automated Red-Team Suite tests 100% REAL production functions!
 # =====================================================================
 param(
-    [switch]$LibraryOnly
+    [switch]$LibraryOnly,
+    [string]$TestStateDir = ""
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
-function Resolve-SentinelStateDir {
-    $defaultDir = "$env:LOCALAPPDATA\SecuritySentinel"
-    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
-        try {
-            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + "\"
-            $cand = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
-            if ($cand.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $cand
-            }
-        } catch {}
-    }
-    return $defaultDir
-}
-
 $ProgDir      = "$env:ProgramFiles\SecuritySentinel"
-$StateDir     = Resolve-SentinelStateDir
+$StateDir     = if ($LibraryOnly -and -not [string]::IsNullOrWhiteSpace($TestStateDir)) {
+    $TestStateDir
+} else {
+    "$env:LOCALAPPDATA\SecuritySentinel"
+}
 $SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
     $ProgDir
 } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {
@@ -710,10 +701,13 @@ function Test-SentinelLogIntegrity {
         }
         $prevHmac = $claimedHmac
     }
-    # Verify chain tail against sealed tip to detect end-of-file truncation!
-    if ($lines.Count -gt 0 -and $LogTipFile -and (Test-Path $LogTipFile)) {
+    # Verify chain tail against sealed tip to detect end-of-file truncation (fail-closed if tip is missing!)
+    if ($lines.Count -gt 0) {
+        if ((-not $LogTipFile) -or (-not (Test-Path $LogTipFile))) {
+            return @{ Valid = $false; TotalLines = $lines.Count; TamperedLine = $lines.Count; Reason = "MissingLogTipAnchor" }
+        }
         $sealedTip = Unprotect-DpapiString ((Get-Content $LogTipFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue))
-        if ($sealedTip -and ($sealedTip.Trim().ToUpper() -ne $prevHmac)) {
+        if ((-not $sealedTip) -or ($sealedTip.Trim().ToUpper() -ne $prevHmac)) {
             return @{ Valid = $false; TotalLines = $lines.Count; TamperedLine = $lines.Count; Reason = "LogTailTruncatedOrModified" }
         }
     }

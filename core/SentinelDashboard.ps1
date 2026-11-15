@@ -5,20 +5,6 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic, System.Security
 
-function Resolve-SentinelStateDir {
-    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
-    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
-        try {
-            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
-            $candidate = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
-            if ($candidate.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $candidate
-            }
-        } catch {}
-    }
-    return $defaultDir
-}
-
 $RegInstallDir = $null
 foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
     if (Test-Path $rp) {
@@ -28,7 +14,7 @@ foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWAR
 }
 
 $ProgDir       = "$env:ProgramFiles\SecuritySentinel"
-$SentinelDir   = Resolve-SentinelStateDir
+$SentinelDir   = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
 $CodeDir       = if ($RegInstallDir) { $RegInstallDir } elseif (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) { $ProgDir } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) { $PSScriptRoot } else { $SentinelDir }
 $ConfigFile    = Join-Path $SentinelDir "config.json"
 $PortableCfg   = Join-Path $PSScriptRoot "config.json"
@@ -554,7 +540,10 @@ function Append-DashboardLog([string]$Msg) {
     $hmac.Dispose()
     $newHmac = ([BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16))
     Add-Content -Path $LogFile -Value "$coreLine [HMAC:$newHmac]" -Encoding UTF8 -ErrorAction SilentlyContinue
-    try { [System.IO.File]::WriteAllText($LogTipFile, $newHmac, [System.Text.Encoding]::UTF8) } catch {}
+    try {
+        $tipEnc = Protect-DpapiString $newHmac
+        if ($tipEnc) { [System.IO.File]::WriteAllText($LogTipFile, $tipEnc, [System.Text.Encoding]::UTF8) }
+    } catch {}
 }
 
 function Get-DaemonProcess {

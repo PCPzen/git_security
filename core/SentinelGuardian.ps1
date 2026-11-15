@@ -6,27 +6,18 @@
 # 3. Fail-Closed External Trust Anchor (Zero disk-hash or static fallback!)
 # =====================================================================
 param(
-    [switch]$LibraryOnly
+    [switch]$LibraryOnly,
+    [string]$TestStateDir = ""
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 
-function Resolve-SentinelStateDir {
-    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
-    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
-        try {
-            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
-            $candidate = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
-            if ($candidate.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $candidate
-            }
-        } catch {}
-    }
-    return $defaultDir
-}
-
 $ProgDir      = "$env:ProgramFiles\SecuritySentinel"
-$StateDir     = Resolve-SentinelStateDir
+$StateDir     = if ($LibraryOnly -and -not [string]::IsNullOrWhiteSpace($TestStateDir)) {
+    $TestStateDir
+} else {
+    Join-Path $env:LOCALAPPDATA "SecuritySentinel"
+}
 $SentinelDir  = if (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
     $ProgDir
 } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "SentinelWatchdog.ps1"))) {

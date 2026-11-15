@@ -12,22 +12,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
 
-function Resolve-SentinelStateDir {
-    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
-    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
-        try {
-            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + "\"
-            $cand = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
-            if ($cand.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $cand
-            }
-        } catch {}
-    }
-    return $defaultDir
-}
-
 $isAdmin   = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-$StateDir  = Resolve-SentinelStateDir
+$StateDir  = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
 $TargetDir = if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir
 } elseif ($isAdmin) {
@@ -109,9 +95,18 @@ function Get-OrCreateInstallSecret {
     $vaultFile = Join-Path $StateDir "vault.sec"
 
     if ($isAdmin) {
-        # Remove any user-readable vault.sec so non-elevated processes can NEVER read the Admin secret
+        # Remove any user-readable vault.sec so non-elevated processes can NEVER read the Admin secret.
+        # If vault.sec existed (e.g., from a legacy install), rotate the HKLM secret so the leaked key is invalidated!
+        $hadLeakedVault = $false
         if (Test-Path $vaultFile) {
+            $hadLeakedVault = $true
             Remove-Item -Path $vaultFile -Force -ErrorAction Stop
+            Remove-Item -Path (Join-Path $StateDir "manifest.json") -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path (Join-Path $StateDir "logs\sentinel.tip") -Force -ErrorAction SilentlyContinue
+            $oldLog = Join-Path $StateDir "logs\sentinel.log"
+            if (Test-Path $oldLog) {
+                Move-Item -Path $oldLog -Destination (Join-Path $StateDir "logs\sentinel.pre_rotation_$(Get-Date -Format 'yyyyMMddHHmmss').log") -Force -ErrorAction SilentlyContinue
+            }
         }
 
         $rootKey = "HKLM:\SOFTWARE\SecuritySentinel"
@@ -119,12 +114,16 @@ function Get-OrCreateInstallSecret {
         Set-AndVerifySentinelRegistryAcl -KeyPath $rootKey
         Set-AndVerifySentinelRegistryAcl -KeyPath $secKey
 
-        $b64 = (Get-ItemProperty -Path $secKey -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
-        if ($b64) {
-            try {
-                $existing = [Convert]::FromBase64String($b64)
-                if ($existing -and $existing.Length -ge 16) { return $existing }
-            } catch {}
+        if (-not $hadLeakedVault) {
+            $b64 = (Get-ItemProperty -Path $secKey -Name "InstallSecret" -ErrorAction SilentlyContinue).InstallSecret
+            if ($b64) {
+                try {
+                    $existing = [Convert]::FromBase64String($b64)
+                    if ($existing -and $existing.Length -ge 16) { return $existing }
+                } catch {}
+            }
+        } else {
+            Write-Host "  -> [SECURITY] Legacy vault.sec detected in Admin mode; purged and rotating HKLM InstallSecret." -ForegroundColor Yellow
         }
 
         $rngBytes = New-Object byte[] 32
@@ -343,13 +342,12 @@ if ($isAdmin) {
     }
 }
 
-# 3. Register Scheduled Task (#7: Never downgrade AllSigned ExecutionPolicy!)
+# 3. Register Scheduled Task (Never modify or downgrade user ExecutionPolicy)
 Write-Host "`n[3/4] Registering Auto-Start Task in Windows Task Scheduler..." -ForegroundColor White
 try {
     $curPol = Get-ExecutionPolicy -Scope CurrentUser -ErrorAction SilentlyContinue
-    if ($curPol -in @("Undefined", "Restricted")) {
-        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction SilentlyContinue
-        Write-Host "  -> Set CurrentUser ExecutionPolicy to RemoteSigned (was $curPol)." -ForegroundColor Green
+    if ($curPol -eq "Restricted") {
+        Write-Host "  -> [WARN] CurrentUser ExecutionPolicy is 'Restricted'; local unsigned scripts may be blocked." -ForegroundColor Yellow
     } else {
         Write-Host "  -> Preserved existing CurrentUser ExecutionPolicy: $curPol" -ForegroundColor DarkGray
     }

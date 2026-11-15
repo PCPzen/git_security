@@ -7,20 +7,6 @@
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Security
 
-function Resolve-SentinelStateDir {
-    $defaultDir = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
-    if ($env:SENTINEL_TEST_MODE -eq "1" -and $env:SENTINEL_STATE_DIR) {
-        try {
-            $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
-            $candidate = [System.IO.Path]::GetFullPath($env:SENTINEL_STATE_DIR)
-            if ($candidate.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $candidate
-            }
-        } catch {}
-    }
-    return $defaultDir
-}
-
 $RegInstallDir = $null
 foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWARE\SecuritySentinel\IntegrityAnchor")) {
     if (Test-Path $rp) {
@@ -30,7 +16,7 @@ foreach ($rp in @("HKLM:\SOFTWARE\SecuritySentinel\PublicHashes", "HKLM:\SOFTWAR
 }
 
 $ProgDir       = "$env:ProgramFiles\SecuritySentinel"
-$StateDir      = Resolve-SentinelStateDir
+$StateDir      = Join-Path $env:LOCALAPPDATA "SecuritySentinel"
 $SentinelDir   = if ($RegInstallDir) {
     $RegInstallDir
 } elseif (Test-Path (Join-Path $ProgDir "SentinelWatchdog.ps1")) {
