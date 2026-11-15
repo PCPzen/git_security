@@ -114,25 +114,32 @@ $appContext = New-Object System.Windows.Forms.ApplicationContext
 $notify = New-Object System.Windows.Forms.NotifyIcon
 
 $customIcon = $null
-foreach ($dir in @($SentinelDir, $StateDir)) {
-    if (-not $dir) { continue }
-    $icoPath = Join-Path $dir "sentinel.ico"
+if ($SentinelDir) {
+    $icoPath = Join-Path $SentinelDir "sentinel.ico"
     if (Test-Path $icoPath -PathType Leaf) {
-        try { $customIcon = New-Object System.Drawing.Icon($icoPath); break } catch {}
+        try { $customIcon = New-Object System.Drawing.Icon($icoPath) } catch {}
     }
-    foreach ($ext in @("sentinel.png", "sentinel.jpg")) {
-        $imgPath = Join-Path $dir $ext
-        if (Test-Path $imgPath -PathType Leaf) {
-            try {
-                $bmp = New-Object System.Drawing.Bitmap($imgPath)
-                $scaled = New-Object System.Drawing.Bitmap($bmp, (New-Object System.Drawing.Size(64, 64)))
-                $customIcon = [System.Drawing.Icon]::FromHandle($scaled.GetHicon())
-                $bmp.Dispose()
-                break
-            } catch {}
+    if (-not $customIcon) {
+        foreach ($ext in @("sentinel.png", "sentinel.jpg")) {
+            $imgPath = Join-Path $SentinelDir $ext
+            if (Test-Path $imgPath -PathType Leaf) {
+                $bmp = $null
+                $scaled = $null
+                try {
+                    $bmp = New-Object System.Drawing.Bitmap($imgPath)
+                    $scaled = New-Object System.Drawing.Bitmap($bmp, (New-Object System.Drawing.Size(64, 64)))
+                    $hIcon = $scaled.GetHicon()
+                    $tmpIcon = [System.Drawing.Icon]::FromHandle($hIcon)
+                    $customIcon = $tmpIcon.Clone()
+                    $tmpIcon.Dispose()
+                    break
+                } catch {} finally {
+                    if ($scaled) { $scaled.Dispose() }
+                    if ($bmp) { $bmp.Dispose() }
+                }
+            }
         }
     }
-    if ($customIcon) { break }
 }
 $notify.Icon = if ($customIcon) { $customIcon } else { [System.Drawing.SystemIcons]::Shield }
 $notify.Text = "Security Sentinel Ultra v8.0"

@@ -197,15 +197,25 @@ function Signal-GracefulStop($dir, [byte[]]$secretBytes) {
     } catch {}
 }
 
+function Get-RunningSentinelProcesses {
+    $procs = @()
+    try {
+        $procs += @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" })
+    } catch {}
+    return $procs
+}
+
 # 0. Stop any existing Watchdog/Guardian BEFORE rotating/purging secrets so old in-memory processes accept the stop token!
 $script:RotatedLeakedSecret = $false
 $oldSecrets = @(Get-ExistingStopSecrets $StateDir)
 foreach ($oldSec in $oldSecrets) {
-    $pidFileCheck = Join-Path $StateDir "sentinel.pid"
-    if (-not (Test-Path $pidFileCheck)) { break }
+    $runningBefore = @(Get-RunningSentinelProcesses)
+    if ($runningBefore.Count -eq 0 -and -not (Test-Path (Join-Path $StateDir "sentinel.pid"))) { break }
     Signal-GracefulStop $StateDir $oldSec
     $waitMs = 0
-    while ((Test-Path $pidFileCheck) -and ($waitMs -lt 2500)) {
+    while ($waitMs -lt 6500) {
+        $still = @(Get-RunningSentinelProcesses)
+        if ($still.Count -eq 0 -and -not (Test-Path (Join-Path $StateDir "sentinel.pid"))) { break }
         Start-Sleep -Milliseconds 250
         $waitMs += 250
     }
@@ -221,9 +231,17 @@ try {
 }
 
 if ($script:RotatedLeakedSecret) {
-    $stillRunning = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "SentinelWatchdog\.ps1|SentinelGuardian\.ps1" }
-    if ($stillRunning) {
-        Write-Host "  -> [WARN] Legacy Watchdog/Guardian process is still running after secret rotation. Please reboot or log off to clear old in-memory state." -ForegroundColor Yellow
+    $stillRunning = @(Get-RunningSentinelProcesses)
+    if ($stillRunning.Count -gt 0 -and $isAdmin) {
+        foreach ($p in $stillRunning) {
+            Stop-Process -Id ([int]$p.ProcessId) -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 800
+        $stillRunning = @(Get-RunningSentinelProcesses)
+    }
+    if ($stillRunning.Count -gt 0) {
+        Write-Host "[FATAL] Legacy Watchdog/Guardian process(es) still running with old leaked secret after rotation. Please reboot or log off and re-run Install.ps1." -ForegroundColor Red
+        exit 1
     }
 }
 

@@ -680,12 +680,18 @@ function Write-Log {
 function Test-SentinelLogIntegrity {
     param([string]$Path = $LogFile)
     if (-not (Test-Path $Path)) {
+        if ($LogTipFile -and (Test-Path $LogTipFile)) {
+            return @{ Valid = $false; TotalLines = 0; TamperedLine = 0; Reason = "LogFileDeletedWhileTipExists" }
+        }
         return @{ Valid = $true; TotalLines = 0; TamperedLine = 0; Reason = "LogFileNotPresent" }
     }
     if (-not $script:SentinelEntropyBytes -or $script:SentinelEntropyBytes.Length -lt 16) {
         return @{ Valid = $false; TotalLines = 0; TamperedLine = 0; Reason = "SecretUnavailable" }
     }
     $lines = @(Get-Content -Path $Path -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0 -and $LogTipFile -and (Test-Path $LogTipFile)) {
+        return @{ Valid = $false; TotalLines = 0; TamperedLine = 0; Reason = "LogFileClearedWhileTipExists" }
+    }
     $prevHmac = "0000000000000000"
     $lineIdx = 0
     foreach ($ln in $lines) {

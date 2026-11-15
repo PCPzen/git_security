@@ -274,9 +274,15 @@ try {
         $lines = Get-Content -Path $truncLog -Encoding UTF8
         [System.IO.File]::WriteAllLines($truncLog, $lines[0..1], [System.Text.Encoding]::UTF8)
         $afterTrunc = Test-SentinelLogIntegrity -Path $truncLog
+        # Verify full log deletion while tip exists is detected
+        Remove-Item $truncLog -Force -ErrorAction SilentlyContinue
+        $deletedLog = Test-SentinelLogIntegrity -Path $truncLog
+        Remove-Item $script:LogTipFile -Force -ErrorAction SilentlyContinue
+        Write-Log -Message "Chain entry 4" -Level "INFO"
         Remove-Item $script:LogTipFile -Force -ErrorAction SilentlyContinue
         $missingTip = Test-SentinelLogIntegrity -Path $truncLog
         Assert-Test -Name "Test-SentinelLogIntegrity detects tail-truncation via sentinel.tip" -Condition ($beforeTrunc.Valid -and (-not $afterTrunc.Valid))
+        Assert-Test -Name "Test-SentinelLogIntegrity detects full log deletion when sentinel.tip exists" -Condition ((-not $deletedLog.Valid) -and ($deletedLog.Reason -eq "LogFileDeletedWhileTipExists"))
         Assert-Test -Name "Test-SentinelLogIntegrity fails closed when sentinel.tip is missing" -Condition ((-not $missingTip.Valid) -and ($missingTip.Reason -eq "MissingLogTipAnchor"))
     } finally {
         $script:LogFile    = $savedLogFile

@@ -207,16 +207,23 @@ try {
     # LIVE TEST 4: Real Kernel DACL & Guardian Twin Stop-Token Security (A3)
     # ---------------------------------------------------------------------
     $childScriptPath = Join-Path $AuditStateDir "dacl_child_test.ps1"
+    $daclReadyFlag   = Join-Path $AuditStateDir "dacl_ready.flag"
+    Remove-Item $daclReadyFlag -Force -ErrorAction SilentlyContinue
     $childScriptContent = @"
 Add-Type -TypeDefinition @'
 $daclCode
 '@ -Language CSharp -ErrorAction SilentlyContinue
 [void][SentinelGuardianNative.SelfDefense]::HardenDacl()
-Start-Sleep -Seconds 4
+[System.IO.File]::WriteAllText("$daclReadyFlag", "OK")
+Start-Sleep -Seconds 6
 "@
     [System.IO.File]::WriteAllText($childScriptPath, $childScriptContent, [System.Text.Encoding]::UTF8)
     $childProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$childScriptPath`"" -WindowStyle Hidden -PassThru
-    Start-Sleep -Milliseconds 1200
+    $waitDaclMs = 0
+    while ((-not (Test-Path $daclReadyFlag)) -and ($waitDaclMs -lt 8000)) {
+        Start-Sleep -Milliseconds 200
+        $waitDaclMs += 200
+    }
 
     $hTerminate = [SentinelNative.KernelControl]::OpenProcess(0x0001, $false, $childProc.Id)
     $hWriteDac  = [SentinelNative.KernelControl]::OpenProcess(0x00040000, $false, $childProc.Id)
@@ -307,7 +314,7 @@ Start-Sleep -Seconds 4
     # ---------------------------------------------------------------------
     # LIVE TEST 7: Tamper-Evident HMAC Log Chain (C1) & 10-Script Trust Anchor (B1)
     # ---------------------------------------------------------------------
-    Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $LogFile, $LogTipFile -Force -ErrorAction SilentlyContinue
     Write-Log "Audit HMAC Chain Entry 1" "INFO"
     Write-Log "Audit HMAC Chain Entry 2" "WARN"
     Write-Log "Audit HMAC Chain Entry 3" "CRITICAL"
